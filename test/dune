@@ -1,3 +1,9 @@
 (test
  (name test_core)
+ (modules test_core)
+ (libraries oxgpu))
+
+(executable
+ (name check_compiler_metadata)
+ (modules check_compiler_metadata)
  (libraries oxgpu))

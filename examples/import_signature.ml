@@ -16,10 +16,13 @@ let string_of_permission = function
 
 let () =
   if Array.length Sys.argv <> 2 then begin
-    prerr_endline "usage: import_signature.exe FILE.mli";
+    prerr_endline "usage: import_signature.exe FILE.gpu";
     exit 2
   end;
-  let signature = Oxcaml_frontend.parse_file Sys.argv.(1) in
+  let channel = open_in Sys.argv.(1) in
+  let metadata = Fun.protect ~finally:(fun () -> close_in channel) (fun () ->
+    really_input_string channel (in_channel_length channel)) in
+  let signature = Oxcaml_frontend.parse_typedtree_metadata metadata in
   Printf.printf "kernel %s\n" signature.name;
   List.iteri (fun i arg ->
     let value = arg.Ir.value in
