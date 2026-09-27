@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="${OXCAML_ROOT:-/tmp/oxcaml-src}"
+root="${OXCAML_ROOT:-$HOME/src/oxcaml-src}"
 compiler="${OXCC:-$root/_build/_bootinstall/bin/ocamlc.opt}"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT

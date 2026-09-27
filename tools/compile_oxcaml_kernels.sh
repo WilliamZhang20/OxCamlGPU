@@ -8,7 +8,7 @@ fi
 out="$1"
 mkdir -p "$out"
 
-root="${OXCAML_ROOT:-/tmp/oxcaml-src}"
+root="${OXCAML_ROOT:-$HOME/src/oxcaml-src}"
 main_build="${OXCAML_MAIN_BUILD:-$root/_build/main}"
 stdlib_dir="${OXCAML_STDLIB_DIR:-$root/_build/runtime_stdlib_install/lib/ocaml_runtime_stdlib}"
 compiler="${OXCC:-$root/_build/_bootinstall/bin/ocamlc.opt}"
