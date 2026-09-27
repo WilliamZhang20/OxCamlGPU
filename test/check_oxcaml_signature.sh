@@ -9,7 +9,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 tools/compile_oxcaml_kernels.sh "$tmpdir"
 
 # The debug dump is used only as an additional assertion. The actual compiler
-# bridge reads .cmti/.cmt typedtrees via compiler-libs.
+# bridge reads the kernel .cmt typedtrees via compiler-libs.
 "$compiler" -nostdlib -nopervasives -bin-annot -dtypedtree -c \
   -o "$tmpdir/mode_probe.cmi" test/fixtures/mode_probe.mli 2>"$tmpdir/mode_probe.typedtree"
 rg -q 'local,.*unique' "$tmpdir/mode_probe.typedtree"

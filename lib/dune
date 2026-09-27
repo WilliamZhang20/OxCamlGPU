@@ -1,3 +1,4 @@
 (library
  (name oxgpu)
+ (modules gpu_type mode ir verifier ptx kernel_ast kernel_frontend oxcaml_frontend)
  (wrapped false))

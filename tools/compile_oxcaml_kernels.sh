@@ -26,20 +26,25 @@ done
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+cp tools/export_typedtree_modes.ml "$tmp/export_typedtree_modes.ml"
 
 "$native_compiler" -I "$stdlib_dir" \
   -I "$main_build/.ocamlcommon.objs/byte" -I "$main_build/.ocamlcommon.objs/native" \
   -I "$main_build/.ocamlfrontend.objs/byte" -I "$main_build/.ocamlfrontend.objs/native" \
   -I "$main_build/.oxcaml_common.objs/byte" -I "$main_build/.oxcaml_common.objs/native" \
   "$main_build/ocamlcommon.cmxa" "$main_build/ocamlfrontend.cmxa" \
-  "$main_build/oxcaml_common.cmxa" tools/export_typedtree_modes.ml \
+  "$main_build/oxcaml_common.cmxa" "$tmp/export_typedtree_modes.ml" \
   -ccopt "-L$stdlib_dir" -o "$tmp/export_typedtree_modes"
 
+# The OxCaml-only DSL API lives in lib/ alongside the compiler library. Dune's
+# host OCaml build excludes it because ordinary OCaml cannot parse mode syntax.
+"$compiler" -nostdlib -I "$stdlib_dir" -bin-annot -c \
+  -o "$tmp/gpu_dsl.cmi" lib/gpu_dsl.mli
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/gpu_dsl.cmo" lib/gpu_dsl.ml
+
 for kernel in saxpy vector_add; do
-  "$compiler" -nostdlib -nopervasives -bin-annot -c \
-    -o "$tmp/$kernel.cmi" "examples/kernels/$kernel.mli"
-  "$compiler" -nostdlib -nopervasives -I "$tmp" -bin-annot -c \
+  "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
-  "$tmp/export_typedtree_modes" "$tmp/$kernel.cmti" "$kernel" > "$out/$kernel.gpu"
-  "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" >> "$out/$kernel.gpu"
+  "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" > "$out/$kernel.gpu"
 done

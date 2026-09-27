@@ -2,12 +2,12 @@
 
 This prototype checks whether facts assigned by the OxCaml compiler can be carried from typed source into GPU IR and used by verification. Kernel authors write ordinary OxCaml functions. Only GPU operations such as `Gpu.thread_idx_x`, `Gpu.load`, and `Gpu.store` are special.
 
-The sample kernels are [SAXPY](examples/kernels/saxpy.ml) and [vector_add](examples/kernels/vector_add.ml); their interfaces live beside them. OxCaml typechecks each `.mli` and `.ml` and writes `.cmti` and `.cmt` typedtree artifacts. A small compiler-libs adapter reads those artifacts and exports a stable tab-separated representation. Our importer builds the source AST and mode-bearing signature from that representation, then lowers to GPU IR.
+Each example kernel is one [SAXPY](examples/kernels/saxpy.ml) or [vector_add](examples/kernels/vector_add.ml) source file. Its modal function type annotation sits directly on the `let` binding, beside the body, so there is no separate per-kernel `.mli`. The shared source API is [lib/gpu_dsl.mli](lib/gpu_dsl.mli) and its primitive declarations are in [lib/gpu_dsl.ml](lib/gpu_dsl.ml). The examples use ordinary `float` and `int` types and operators; only thread indexing and buffer access are `Gpu.*` calls. OxCaml typechecks the prelude and each kernel and writes typedtree artifacts. A small compiler-libs adapter reads each kernel's `.cmt` and exports its inferred argument/result modes and supported body as stable metadata. Our importer builds the source AST and mode-bearing signature from that representation, then lowers to GPU IR.
 
 ```text
-OxCaml .mli/.ml
+OxCaml kernel .ml
         ↓ OxCaml typechecker
-.cmti/.cmt Typedtree
+.cmt Typedtree
         ↓ version-matched compiler-libs adapter
 stable GPU metadata
         ↓ Kernel_ast + Oxcaml_frontend
@@ -27,9 +27,9 @@ Those are build-tree symlinks to OxCaml's native compiler executables. The match
 
 The integration currently works as a compiler invocation plus a small adapter, rather than embedding OxCaml inside OxCamlGPU:
 
-1. The script runs `ocamlc.opt -bin-annot` on each kernel interface and implementation. This makes `.cmti` and `.cmt` artifacts containing compiler Typedtrees.
+1. The script compiles `lib/gpu_dsl.mli/.ml` once as a shared kernel API, then runs `ocamlc.opt -bin-annot` on each kernel `.ml`. Each function's mode-annotated type and body are captured in one `.cmt` Typedtree artifact. Dune's host OCaml build excludes `Gpu_dsl` because its mode annotations require OxCaml.
 2. It builds `tools/export_typedtree_modes.ml` against that same build's `ocamlcommon.cmxa`, `ocamlfrontend.cmxa`, and `oxcaml_common.cmxa`.
-3. The adapter reads the artifacts with `Cmt_format`, exports argument/result types and modes plus the supported function body as tab-separated `.gpu` metadata.
+3. The adapter reads each `.cmt` with `Cmt_format`, exports argument/result types and modes plus the supported function body as tab-separated `.gpu` metadata.
 4. `Oxcaml_frontend` and `Kernel_ast` import that metadata; the existing lowering, verifier, and PTX stages then run.
 
 The compiler and compiler-libs must come from the **same OxCaml build**: their artifact formats and Typedtree APIs are build-specific. For another local build, set `OXCAML_ROOT` or override all paths with `OXCAML_MAIN_BUILD`, `OXCAML_STDLIB_DIR`, `OXCC`, and `OXOPT`. Example:

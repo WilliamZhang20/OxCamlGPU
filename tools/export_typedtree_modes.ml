@@ -4,9 +4,6 @@ open Typedtree
 
 let fail message = prerr_endline message; exit 2
 
-let mode_string modes =
-  Format_doc.asprintf "%a" Mode.With_locality.Const.print modes.mode_modes
-
 let tokens mode =
   String.split_on_char ',' mode |> List.map String.trim
 
@@ -15,47 +12,14 @@ let choose options values fallback =
   | Some value -> value
   | None -> fallback
 
-let serialize_modes modes =
-  let values = tokens (mode_string modes) in
+let serialize_arrow_mode mode =
+  let modes = Mode.With_locality.to_const_exn mode in
+  let values = tokens (Format_doc.asprintf "%a" Mode.With_locality.Const.print modes) in
   [ choose ["unique"; "aliased"] values "aliased";
     choose ["local"; "global"] values "global";
     choose ["portable"; "nonportable"] values "nonportable";
     choose ["read_write"; "read"; "write"; "immutable"] values "read_write" ]
   |> String.concat "\t"
-
-let rec flatten_longident = function
-  | Longident.Lident value -> value
-  | Longident.Ldot (prefix, value) -> flatten_longident prefix.txt ^ "." ^ value.txt
-  | Longident.Lapply (fn, arg) -> flatten_longident fn.txt ^ "(" ^ flatten_longident arg.txt ^ ")"
-
-let rec source_type typ = match typ.ctyp_desc with
-  | Ttyp_constr (_, path, []) -> flatten_longident path.txt
-  | Ttyp_constr (_, path, [argument]) when flatten_longident path.txt = "gpu_array" ->
-      "gpu_array<" ^ source_type argument ^ ">"
-  | Ttyp_alias (inner, _, _) -> source_type inner
-  | _ -> "unsupported"
-
-let kind typ = match source_type typ with
-  | "gpu_array<f32>" | "gpu_array<float>" -> "buffer_f32"
-  | "f32" | "float" -> "scalar_f32"
-  | "i32" | "int" -> "scalar_i32"
-  | "unit" -> "unit"
-  | _ -> "unsupported"
-
-let emit_signature target item = match item.sig_desc with
-  | Tsig_value value when value.val_name.txt = target ->
-      Printf.printf "kernel\t%s\n" value.val_name.txt;
-      let rec arrows index typ result_modes = match typ.ctyp_desc with
-        | Ttyp_arrow (_, arg, arg_modes, result, return_modes) ->
-            Printf.printf "arg\t%d\t%s\t%s\n" index (kind arg)
-              (serialize_modes arg_modes);
-            arrows (index + 1) result (Some return_modes)
-        | _ ->
-            (match result_modes with
-             | Some modes -> Printf.printf "result\t%s\t%s\n" (kind typ) (serialize_modes modes)
-             | None -> fail "typedtree signature has no result mode") in
-      arrows 0 value.val_desc None
-  | _ -> ()
 
 (* Keep the exporter independent of OxCamlGPU's runtime modules. *)
 type kernel_expr =
@@ -139,6 +103,38 @@ let parameter_type typ = match Types.get_desc typ with
   | Types.Tconstr (path, _, _) -> Path.name path
   | _ -> ""
 
+let last_component path = match List.rev (String.split_on_char '.' (Path.name path)) with
+  | name :: _ -> name | [] -> ""
+
+let rec kind_of_type typ = match Types.get_desc typ with
+  | Types.Tpoly (inner, _) -> kind_of_type inner
+  | Types.Tconstr (path, [element], _) when last_component path = "gpu_array" ->
+      (match kind_of_type element with "scalar_f32" -> "buffer_f32" | _ -> "unsupported")
+  | Types.Tconstr (path, [], _) ->
+      (match last_component path with
+       | "float" -> "scalar_f32" | "int" -> "scalar_i32" | "unit" -> "unit"
+       | _ -> "unsupported")
+  | _ -> "unsupported"
+
+let emit_implementation_signature target binding =
+  let name = match binding.vb_pat.pat_desc with
+    | Tpat_var {name; _} -> name.txt
+    | _ -> fail "kernel binding must have a simple name" in
+  Printf.printf "kernel\t%s\n" name;
+  let rec arrows index typ last_result_modes = match Types.get_desc typ with
+    | Types.Tpoly (inner, _) -> arrows index inner last_result_modes
+    | Types.Tarrow ((_, arg_modes, result_modes), arg, result, _) ->
+        Printf.printf "arg\t%d\t%s\t%s\n" index (kind_of_type arg)
+          (serialize_arrow_mode arg_modes);
+        arrows (index + 1) result (Some result_modes)
+    | _ ->
+        (match last_result_modes with
+         | Some modes ->
+             Printf.printf "result\t%s\t%s\n" (kind_of_type typ)
+               (serialize_arrow_mode modes)
+         | None -> fail "typed implementation has no function result mode") in
+  arrows 0 binding.vb_pat.pat_type None
+
 let compile_kernel target structure =
   let binding = List.find_map (fun item -> match item.str_desc with
     | Tstr_value (_, bindings) -> List.find_opt (fun binding -> match binding.vb_pat.pat_desc with
@@ -146,6 +142,7 @@ let compile_kernel target structure =
         | _ -> false) bindings
     | _ -> None) structure.str_items in
   let binding = match binding with Some binding -> binding | None -> fail ("no kernel function named " ^ target) in
+  emit_implementation_signature target binding;
   match binding.vb_expr.exp_desc with
   | Texp_function {params; body=Tfunction_body body; _} ->
       let env = List.mapi (fun index param ->
@@ -156,11 +153,10 @@ let compile_kernel target structure =
   | _ -> fail "kernel must be a simple function with a body"
 
 let () =
-  if Array.length Sys.argv <> 3 then fail "usage: export_typedtree_modes FILE.cmti|cmt KERNEL_NAME";
+  if Array.length Sys.argv <> 3 then fail "usage: export_typedtree_modes FILE.cmt KERNEL_NAME";
   let _, cmt = Cmt_format.read Sys.argv.(1) in
   match cmt with
   | None -> fail "no OxCaml typedtree annotation found"
   | Some cmt -> match cmt.cmt_annots with
-      | Interface signature -> List.iter (emit_signature Sys.argv.(2)) signature.sig_items
       | Implementation structure -> compile_kernel Sys.argv.(2) structure
       | _ -> fail "expected an OxCaml typed interface or implementation"
