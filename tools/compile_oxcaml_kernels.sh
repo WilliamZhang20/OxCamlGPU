@@ -48,3 +48,9 @@ for kernel in saxpy vector_add; do
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
   "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" > "$out/$kernel.gpu"
 done
+
+# A small fixture keeps non-kernel examples from carrying adapter-only syntax
+# just to exercise literal lowering.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/literal_probe.cmo" test/fixtures/literal_probe.ml
+"$tmp/export_typedtree_modes" "$tmp/literal_probe.cmt" literal_probe > "$out/literal_probe.gpu"

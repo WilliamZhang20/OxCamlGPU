@@ -39,7 +39,7 @@ tools/compile_oxcaml_kernels.sh /tmp/oxgpu-metadata
 dune exec examples/saxpy.exe -- /tmp/oxgpu-metadata/saxpy.gpu
 ```
 
-This is an initial adaptation point, not a replacement OxCaml parser or a general typedtree-to-GPU lowering. The adapter currently accepts only the two examples' types and expression forms. The next integration increment should broaden the typedtree mapping while retaining compiler-provided mode information.
+This is an initial adaptation point, not a replacement OxCaml parser or a general typedtree-to-GPU lowering. The adapter currently accepts the examples' types and a small expression subset: local `let` bindings, `thread_idx_x`, buffer loads/stores, `+.`/`*.`, and integer or float literals. Unsupported typedtree nodes, primitive calls, or mode axes fail with an error rather than being silently reinterpreted.
 
 ## Mode contract
 

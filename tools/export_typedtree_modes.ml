@@ -7,24 +7,27 @@ let fail message = prerr_endline message; exit 2
 let tokens mode =
   String.split_on_char ',' mode |> List.map String.trim
 
-let choose options values fallback =
-  match List.find_opt (fun option -> List.mem option values) options with
-  | Some value -> value
-  | None -> fallback
+let choose axis options values =
+  match List.filter (fun option -> List.mem option values) options with
+  | [value] -> value
+  | [] -> fail ("Typedtree mode did not expose the " ^ axis ^ " axis: " ^ String.concat "," values)
+  | _ -> fail ("Typedtree mode exposed conflicting values for " ^ axis ^ ": " ^ String.concat "," values)
 
 let serialize_arrow_mode mode =
   let modes = Mode.With_locality.to_const_exn mode in
   let values = tokens (Format_doc.asprintf "%a" Mode.With_locality.Const.print modes) in
-  [ choose ["unique"; "aliased"] values "aliased";
-    choose ["local"; "global"] values "global";
-    choose ["portable"; "nonportable"] values "nonportable";
-    choose ["read_write"; "read"; "write"; "immutable"] values "read_write" ]
+  [ choose "uniqueness" ["unique"; "aliased"] values;
+    choose "locality" ["local"; "global"] values;
+    choose "portability" ["portable"; "nonportable"] values;
+    choose "visibility" ["read_write"; "read"; "write"; "immutable"] values ]
   |> String.concat "\t"
 
 (* Keep the exporter independent of OxCamlGPU's runtime modules. *)
 type kernel_expr =
   | Arg of int
   | Thread_idx_x
+  | I32_const of int
+  | F32_const of string
   | Load_f32 of int * kernel_expr
   | Add_f32 of kernel_expr * kernel_expr
   | Mul_f32 of kernel_expr * kernel_expr
@@ -33,16 +36,24 @@ type binding = Buffer of int | Value of kernel_expr
 let rec emit_expr = function
   | Arg i -> "arg " ^ string_of_int i
   | Thread_idx_x -> "thread_idx_x"
+  | I32_const n -> "i32 " ^ string_of_int n
+  | F32_const n -> "f32 " ^ n
   | Load_f32 (i, ix) -> "load " ^ string_of_int i ^ " " ^ emit_expr ix
   | Add_f32 (a,b) -> "add " ^ emit_expr a ^ " " ^ emit_expr b
   | Mul_f32 (a,b) -> "mul " ^ emit_expr a ^ " " ^ emit_expr b
 
-let path_last path =
+let primitive_name path =
   let full_name = Path.name path in
-  if String.ends_with ~suffix:"+." full_name then "+."
-  else if String.ends_with ~suffix:"*." full_name then "*."
-  else match List.rev (String.split_on_char '.' full_name) with
-    | name :: _ -> name | [] -> ""
+  let primitive suffix name =
+    if String.ends_with ~suffix full_name then Some name else None in
+  match List.find_map Fun.id
+    [ primitive "Gpu_dsl.Gpu.thread_idx_x" "thread_idx_x";
+      primitive "Gpu_dsl.Gpu.load" "load";
+      primitive "Gpu_dsl.Gpu.store" "store";
+      primitive ".+." "+.";
+      primitive ".*." "*." ] with
+  | Some name -> name
+  | None -> fail ("unsupported call target in GPU kernel: " ^ full_name)
 
 let rec identifier env path = match path with
   | Path.Pident id ->
@@ -56,11 +67,13 @@ let args_of_apply args = List.map (function
   | _ -> fail "only positional, fully applied GPU operations are supported") args
 
 let rec expression env exp = match exp.exp_desc with
+  | Texp_constant (Const_int n) -> I32_const n
+  | Texp_constant (Const_float n) -> F32_const n
   | Texp_ident { path; _ } -> (match identifier env path with Value expr -> expr | Buffer _ -> fail "buffer used as scalar")
   | Texp_open (_, body) -> expression env body
   | Texp_apply (callee, args, _, _, _, _) ->
       let name = match callee.exp_desc with
-        | Texp_ident { path; _ } -> path_last path
+        | Texp_ident { path; _ } -> primitive_name path
         | _ -> fail "GPU call target must be a resolved identifier" in
       let args = args_of_apply args in
       (match name, args with
@@ -85,7 +98,7 @@ let rec statement env exp = match exp.exp_desc with
        | _ -> fail "kernel let binding must bind one name")
   | Texp_apply (callee, args, _, _, _, _) ->
       let name = match callee.exp_desc with
-        | Texp_ident { path; _ } -> path_last path
+        | Texp_ident { path; _ } -> primitive_name path
         | _ -> fail "GPU statement target must be a resolved identifier" in
       let args = args_of_apply args in
       (match name, args with
@@ -120,6 +133,7 @@ let emit_implementation_signature target binding =
   let name = match binding.vb_pat.pat_desc with
     | Tpat_var {name; _} -> name.txt
     | _ -> fail "kernel binding must have a simple name" in
+  Printf.printf "format\t1\n";
   Printf.printf "kernel\t%s\n" name;
   let rec arrows index typ last_result_modes = match Types.get_desc typ with
     | Types.Tpoly (inner, _) -> arrows index inner last_result_modes
@@ -146,9 +160,13 @@ let compile_kernel target structure =
   match binding.vb_expr.exp_desc with
   | Texp_function {params; body=Tfunction_body body; _} ->
       let env = List.mapi (fun index param ->
-        let ty = match param.fp_kind with Tparam_pat pattern -> parameter_type pattern.pat_type | _ -> "" in
-        if String.ends_with ~suffix:"gpu_array" ty then (param.fp_param, Buffer index)
-        else (param.fp_param, Value (Arg index))) params in
+        let ty = match param.fp_kind with
+          | Tparam_pat pattern -> parameter_type pattern.pat_type
+          | _ -> fail "optional kernel parameters are unsupported" in
+        match ty with
+        | "Gpu_dsl.gpu_array" -> (param.fp_param, Buffer index)
+        | "float" -> (param.fp_param, Value (Arg index))
+        | _ -> fail ("unsupported kernel parameter type " ^ ty)) params in
       statement env body
   | _ -> fail "kernel must be a simple function with a body"
 

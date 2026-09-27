@@ -19,5 +19,6 @@ rg -q $'^arg\t0\tbuffer_f32\taliased\tglobal\tnonportable\tread$' "$tmpdir/saxpy
 rg -q $'^arg\t1\tbuffer_f32\tunique\tglobal\tnonportable\tread_write$' "$tmpdir/saxpy.gpu"
 rg -q $'^body\tstore\t1\tthread_idx_x\tadd ' "$tmpdir/saxpy.gpu"
 rg -q $'^body\tstore\t2\tthread_idx_x\tadd ' "$tmpdir/vector_add.gpu"
-dune exec test/check_compiler_metadata.exe -- "$tmpdir/saxpy.gpu" "$tmpdir/vector_add.gpu"
-echo "OxCaml typechecked both kernels; Typedtree bodies and modes reached verified GPU IR"
+rg -q 'f32 2\.5' "$tmpdir/literal_probe.gpu"
+dune exec test/check_compiler_metadata.exe -- "$tmpdir/saxpy.gpu" "$tmpdir/vector_add.gpu" "$tmpdir/literal_probe.gpu"
+echo "OxCaml Typedtree modes, bodies, and literals reached verified GPU IR"

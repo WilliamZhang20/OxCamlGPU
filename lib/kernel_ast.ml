@@ -17,6 +17,7 @@ exception Parse_error of string
 
 let of_compiler_metadata source =
   let fields = String.split_on_char '\n' source |> List.filter ((<>) "") |> List.map (String.split_on_char '\t') in
+  let format_seen = ref false in
   let name = ref None and args = ref [] and body = ref [] in
   let kind = function
     | "buffer_f32" -> Buffer F32
@@ -26,11 +27,18 @@ let of_compiler_metadata source =
   let rec expr tokens = match tokens with
     | "thread_idx_x" :: rest -> Thread_idx_x, rest
     | "arg" :: index :: rest -> Arg (int_of_string index), rest
+    | "i32" :: value :: rest -> I32_const (int_of_string value), rest
+    | "f32" :: value :: rest ->
+        (try F32_const (float_of_string value), rest
+         with Failure _ -> raise (Parse_error ("invalid f32 literal " ^ value)))
     | "load" :: index :: rest -> let index_expr, rest = expr rest in Load_f32 (int_of_string index,index_expr),rest
     | "add" :: rest -> let a, rest=expr rest in let b, rest=expr rest in Add_f32(a,b),rest
     | "mul" :: rest -> let a, rest=expr rest in let b, rest=expr rest in Mul_f32(a,b),rest
     | _ -> raise (Parse_error "malformed typedtree expression") in
   List.iter (function
+    | ["format"; "1"] ->
+        if !format_seen then raise (Parse_error "duplicate metadata format header");
+        format_seen := true
     | ["kernel"; kernel_name] -> name := Some kernel_name
     | ["arg"; index; argument_kind; _ownership; _locality; _portability; _permission] ->
         args := (int_of_string index, kind argument_kind) :: !args
@@ -42,6 +50,7 @@ let of_compiler_metadata source =
         body := Store_f32(int_of_string buffer,parse_expr index,parse_expr value) :: !body
     | ["result"; _; _; _; _; _] -> ()
     | _ -> raise (Parse_error "malformed Typedtree metadata")) fields;
+  if not !format_seen then raise (Parse_error "missing supported metadata format header");
   let name=match !name with Some name->name | None->raise(Parse_error "missing kernel name") in
   let args=List.sort (fun (i,_) (j,_) -> compare i j) !args in
   List.iteri (fun expected (actual,_) -> if expected<>actual then raise(Parse_error "noncontiguous argument indices")) args;

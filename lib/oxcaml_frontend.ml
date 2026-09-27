@@ -44,8 +44,12 @@ let parse_typedtree_metadata source =
       gpu_boundary=Boundary_unspecified } in
   let lines = String.split_on_char '\n' source |> List.map String.trim |> List.filter ((<>) "") in
   let fields line = String.split_on_char '\t' line in
+  let format_seen = ref false in
   let name = ref None and args = ref [] and result = ref None in
   List.iter (fun line -> match fields line with
+    | ["format"; "1"] ->
+        if !format_seen then raise (Parse_error "duplicate metadata format header");
+        format_seen := true
     | ["kernel"; kernel_name] -> name := Some kernel_name
     | ["arg"; index; kind; ownership; locality; portability; permission] ->
         let index = try int_of_string index with Failure _ -> raise (Parse_error "invalid argument index") in
@@ -56,6 +60,7 @@ let parse_typedtree_metadata source =
         result := Some (slot kind [ownership; locality; portability; permission])
     | ["body"; _; _; _; _] -> ()
     | _ -> raise (Parse_error ("malformed typedtree metadata line: " ^ line))) lines;
+  if not !format_seen then raise (Parse_error "typedtree metadata has no supported format header");
   let name = match !name with Some n -> n | None -> raise (Parse_error "typedtree metadata has no kernel declaration") in
   let args = List.sort (fun (i,_) (j,_) -> compare i j) !args in
   List.iteri (fun expected (actual,_) -> if actual <> expected then raise (Parse_error "typedtree argument indices are not contiguous")) args;
