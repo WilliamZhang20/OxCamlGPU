@@ -43,7 +43,7 @@ cp tools/export_typedtree_modes.ml "$tmp/export_typedtree_modes.ml"
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/gpu_dsl.cmo" lib/gpu_dsl.ml
 
-for kernel in saxpy vector_add; do
+for kernel in saxpy vector_add dot_product; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
   "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" > "$out/$kernel.gpu"

@@ -1,3 +1,4 @@
 (executable (name vector_add) (modules vector_add) (libraries oxgpu))
 (executable (name saxpy) (modules saxpy) (libraries oxgpu))
+(executable (name dot_product) (modules dot_product) (libraries oxgpu))
 (executable (name import_signature) (modules import_signature) (libraries oxgpu))

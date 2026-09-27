@@ -31,6 +31,7 @@ type kernel_expr =
   | Load_f32 of int * kernel_expr
   | Add_f32 of kernel_expr * kernel_expr
   | Mul_f32 of kernel_expr * kernel_expr
+  | Warp_sum_f32 of kernel_expr
 type binding = Buffer of int | Value of kernel_expr
 
 let rec emit_expr = function
@@ -41,6 +42,7 @@ let rec emit_expr = function
   | Load_f32 (i, ix) -> "load " ^ string_of_int i ^ " " ^ emit_expr ix
   | Add_f32 (a,b) -> "add " ^ emit_expr a ^ " " ^ emit_expr b
   | Mul_f32 (a,b) -> "mul " ^ emit_expr a ^ " " ^ emit_expr b
+  | Warp_sum_f32 value -> "warp_sum " ^ emit_expr value
 
 let primitive_name path =
   let full_name = Path.name path in
@@ -50,6 +52,8 @@ let primitive_name path =
     [ primitive "Gpu_dsl.Gpu.thread_idx_x" "thread_idx_x";
       primitive "Gpu_dsl.Gpu.load" "load";
       primitive "Gpu_dsl.Gpu.store" "store";
+      primitive "Gpu_dsl.Gpu.warp_sum_f32" "warp_sum_f32";
+      primitive "Gpu_dsl.Gpu.store_lane0" "store_lane0";
       primitive ".+." "+.";
       primitive ".*." "*." ] with
   | Some name -> name
@@ -86,6 +90,7 @@ let rec expression env exp = match exp.exp_desc with
             | _ -> fail "load expects a buffer parameter")
        | "+.", [a;b] -> Add_f32 (expression env a, expression env b)
        | "*.", [a;b] -> Mul_f32 (expression env a, expression env b)
+       | "warp_sum_f32", [value] -> Warp_sum_f32 (expression env value)
        | _ -> fail ("unsupported scalar expression " ^ name))
   | _ -> fail "unsupported expression in GPU kernel"
 
@@ -109,6 +114,12 @@ let rec statement env exp = match exp.exp_desc with
              | _ -> fail "store expects a buffer parameter" in
            let index = expression env index and value = expression env value in
            Printf.printf "body\tstore\t%d\t%s\t%s\n" buffer (emit_expr index) (emit_expr value)
+       | "store_lane0", [buffer; value] ->
+           let buffer = match buffer.exp_desc with
+             | Texp_ident { path=Path.Pident id; _ } ->
+                 (match identifier env (Path.Pident id) with Buffer i -> i | _ -> fail "store_lane0 expects a buffer")
+             | _ -> fail "store_lane0 expects a buffer parameter" in
+           Printf.printf "body\tstore_lane0\t%d\t%s\n" buffer (emit_expr (expression env value))
        | _ -> fail ("unsupported GPU statement " ^ name))
   | _ -> fail "kernel body must end in a store"
 

@@ -7,23 +7,16 @@ type expr =
   | Load_f32 of int * expr
   | Add_f32 of expr * expr
   | Mul_f32 of expr * expr
+  | Warp_sum_f32 of expr
   | I32_const of int
   | F32_const of float
 
-type stmt = Store_f32 of int * expr * expr
+type stmt = Store_f32 of int * expr * expr | Store_lane0_f32 of int * expr
 type t = { name : string; args : arg_kind list; body : stmt list }
 
 exception Parse_error of string
 
 let of_compiler_metadata source =
-  let fields = String.split_on_char '\n' source |> List.filter ((<>) "") |> List.map (String.split_on_char '\t') in
-  let format_seen = ref false in
-  let name = ref None and args = ref [] and body = ref [] in
-  let kind = function
-    | "buffer_f32" -> Buffer F32
-    | "scalar_f32" -> Scalar F32
-    | "scalar_i32" -> Scalar I32
-    | other -> raise (Parse_error ("unsupported typedtree argument " ^ other)) in
   let rec expr tokens = match tokens with
     | "thread_idx_x" :: rest -> Thread_idx_x, rest
     | "arg" :: index :: rest -> Arg (int_of_string index), rest
@@ -34,24 +27,30 @@ let of_compiler_metadata source =
     | "load" :: index :: rest -> let index_expr, rest = expr rest in Load_f32 (int_of_string index,index_expr),rest
     | "add" :: rest -> let a, rest=expr rest in let b, rest=expr rest in Add_f32(a,b),rest
     | "mul" :: rest -> let a, rest=expr rest in let b, rest=expr rest in Mul_f32(a,b),rest
+    | "warp_sum" :: rest -> let a, rest=expr rest in Warp_sum_f32 a,rest
     | _ -> raise (Parse_error "malformed typedtree expression") in
-  List.iter (function
-    | ["format"; "1"] ->
-        if !format_seen then raise (Parse_error "duplicate metadata format header");
-        format_seen := true
-    | ["kernel"; kernel_name] -> name := Some kernel_name
-    | ["arg"; index; argument_kind; _ownership; _locality; _portability; _permission] ->
-        args := (int_of_string index, kind argument_kind) :: !args
+  try
+  let metadata = Gpu_metadata.parse source in
+  let args = List.map (fun (arg : Gpu_metadata.argument) ->
+    let arg_kind = match arg.slot.ty with
+      | Gpu_type.MemRef (_, Gpu_type.Float32, _) -> Buffer F32
+      | Gpu_type.F32 -> Scalar F32 | Gpu_type.I32 -> Scalar I32
+      | _ -> raise (Parse_error "unsupported typedtree argument type") in
+    arg.index, arg_kind) metadata.args in
+  let body = ref [] in
+  List.iter (fun line -> match String.split_on_char '\t' line with
     | ["body"; "store"; buffer; index; value] ->
         let parse_expr source =
           let tokens=String.split_on_char ' ' source |> List.filter ((<>) "") in
           let result, rest=expr tokens in
           if rest <> [] then raise (Parse_error "trailing tokens in typedtree expression"); result in
         body := Store_f32(int_of_string buffer,parse_expr index,parse_expr value) :: !body
-    | ["result"; _; _; _; _; _] -> ()
-    | _ -> raise (Parse_error "malformed Typedtree metadata")) fields;
-  if not !format_seen then raise (Parse_error "missing supported metadata format header");
-  let name=match !name with Some name->name | None->raise(Parse_error "missing kernel name") in
-  let args=List.sort (fun (i,_) (j,_) -> compare i j) !args in
-  List.iteri (fun expected (actual,_) -> if expected<>actual then raise(Parse_error "noncontiguous argument indices")) args;
-  { name; args=List.map snd args; body=List.rev !body }
+    | ["body"; "store_lane0"; buffer; value] ->
+        let parse_expr source =
+          let tokens=String.split_on_char ' ' source |> List.filter ((<>) "") in
+          let result, rest=expr tokens in
+          if rest <> [] then raise (Parse_error "trailing tokens in typedtree expression"); result in
+        body := Store_lane0_f32(int_of_string buffer,parse_expr value) :: !body
+    | _ -> raise (Parse_error "malformed typedtree body")) metadata.body;
+  { name=metadata.name; args=List.map (fun arg -> snd arg) args; body=List.rev !body }
+  with Gpu_metadata.Parse_error message -> raise (Parse_error message)

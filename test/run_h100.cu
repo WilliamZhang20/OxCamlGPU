@@ -1,4 +1,5 @@
 #include <cuda.h>
+#include <math.h>
 #include <stdio.h>
 
 #define CUDA_CHECK(expr) do { \
@@ -12,8 +13,8 @@
 } while (0)
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: %s vector_add.cubin saxpy.cubin\n", argv[0]);
+  if (argc != 4) {
+    fprintf(stderr, "usage: %s vector_add.cubin saxpy.cubin dot_product.cubin\n", argv[0]);
     return 2;
   }
   CUDA_CHECK(cuInit(0));
@@ -63,5 +64,30 @@ int main(int argc, char **argv) {
     }
   }
   puts("H100 vector_add and saxpy passed");
+
+  float dot_x[32], dot_y[32], dot_output = 0.0f, expected_dot = 0.0f;
+  for (int i = 0; i < 32; ++i) {
+    dot_x[i] = (float)(i + 1) * 0.25f;
+    dot_y[i] = (float)(2 * i - 7) * 0.5f;
+    expected_dot += dot_x[i] * dot_y[i];
+  }
+  CUdeviceptr ddot_x, ddot_y, ddot_output;
+  CUDA_CHECK(cuMemAlloc(&ddot_x, sizeof dot_x));
+  CUDA_CHECK(cuMemAlloc(&ddot_y, sizeof dot_y));
+  CUDA_CHECK(cuMemAlloc(&ddot_output, sizeof dot_output));
+  CUDA_CHECK(cuMemcpyHtoD(ddot_x, dot_x, sizeof dot_x));
+  CUDA_CHECK(cuMemcpyHtoD(ddot_y, dot_y, sizeof dot_y));
+  CUDA_CHECK(cuModuleLoad(&module, argv[3]));
+  CUDA_CHECK(cuModuleGetFunction(&function, module, "dot_product"));
+  void *dot_args[] = {&ddot_x, &ddot_y, &ddot_output};
+  CUDA_CHECK(cuLaunchKernel(function, 1, 1, 1, 32, 1, 1, 0, NULL, dot_args, NULL));
+  CUDA_CHECK(cuCtxSynchronize());
+  CUDA_CHECK(cuMemcpyDtoH(&dot_output, ddot_output, sizeof dot_output));
+  if (fabsf(dot_output - expected_dot) > 1e-3f) {
+    fprintf(stderr, "dot_product mismatch: %g, expected %g\n", dot_output, expected_dot);
+    return 5;
+  }
+  CUDA_CHECK(cuModuleUnload(module));
+  puts("H100 vector_add, saxpy, and dot_product passed");
   return 0;
 }
