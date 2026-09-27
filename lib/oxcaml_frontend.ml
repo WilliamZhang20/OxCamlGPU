@@ -1,7 +1,8 @@
 (* A deliberately small importer for OxCaml val declarations. It does not
    parse OCaml generally or inspect compiler artifacts; see README. *)
 open Gpu_type
-open Gpu_ir
+open Mode
+open Ir
 
 type slot = {
   ty : ty;

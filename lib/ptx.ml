@@ -1,4 +1,4 @@
-open Gpu_ir
+open Ir
 
 let reg v = "%r" ^ string_of_int v.id
 let freg v = "%f" ^ string_of_int v.id

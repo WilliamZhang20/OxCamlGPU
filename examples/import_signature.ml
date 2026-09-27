@@ -1,15 +1,15 @@
-let string_of_ownership = function Gpu_type.Unique -> "unique" | Aliased -> "aliased"
-let string_of_locality = function Gpu_type.Local -> "local" | Global -> "global"
+let string_of_ownership = function Mode.Unique -> "unique" | Aliased -> "aliased"
+let string_of_locality = function Mode.Local -> "local" | Global -> "global"
 let string_of_domain_portability = function
-  | Gpu_type.Domain_portable -> "portable"
+  | Mode.Domain_portable -> "portable"
   | Domain_nonportable -> "nonportable"
   | Domain_portability_unspecified -> "unspecified"
 let string_of_boundary = function
-  | Gpu_type.Boundary_unspecified -> "unspecified"
+  | Mode.Boundary_unspecified -> "unspecified"
   | Boundary_portable -> "portable"
   | Boundary_local -> "local"
 let string_of_permission = function
-  | Gpu_type.Read_only -> "read"
+  | Mode.Read_only -> "read"
   | Write_only -> "write"
   | Read_write -> "read_write"
   | Immutable -> "immutable"
@@ -22,7 +22,7 @@ let () =
   let signature = Oxcaml_frontend.parse_file Sys.argv.(1) in
   Printf.printf "kernel %s\n" signature.name;
   List.iteri (fun i arg ->
-    let value = arg.Gpu_ir.value in
+    let value = arg.Ir.value in
     Printf.printf "  arg%d (%s): type=%s ownership=%s locality=%s domain_portability=%s gpu_boundary=%s permission=%s\n"
       i arg.name (Gpu_type.string_of_ty value.ty)
       (string_of_ownership value.ownership) (string_of_locality value.locality)

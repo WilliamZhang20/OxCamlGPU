@@ -1,5 +1,6 @@
 open Gpu_type
-open Gpu_ir
+open Mode
+open Ir
 
 type error = { code : string; message : string }
 exception Invalid_kernel of error list
