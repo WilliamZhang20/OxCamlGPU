@@ -180,8 +180,9 @@ let verify_kernel k =
            when dst.layout = src.layout -> ()
          | _ -> add "E_TENSOR_LAYOUT" "tile scaling requires identical register layouts on input and output")
     | Mul_tensor_f32 (dst, a, b) ->
-        if dst.ty <> a.ty || dst.ty <> b.ty || tile_type dst.ty = None then
-          add "E_TILE_ARITH_TYPE" "tensor multiplication requires matching Tensor values";
+        if dst.ty <> a.ty || dst.ty <> b.ty ||
+           (match dst.ty with Tensor (_, Float32) -> false | _ -> true) then
+          add "E_TILE_ARITH_TYPE" "f32 tensor multiplication requires matching f32 Tensor values";
         (match dst.layout, a.layout, b.layout with
          | Some (Layout.Register _), Some (Layout.Register _), Some (Layout.Register _)
            when dst.layout = a.layout && a.layout = b.layout -> ()
@@ -193,13 +194,7 @@ let verify_kernel k =
         (match src.layout with
          | Some (Layout.Register _) -> ()
          | _ -> add "E_TENSOR_LAYOUT" "reduction input requires a register layout")
-    | Tensor_lane_f32 (dst, src) ->
-        if dst.ty <> F32 || (match src.ty with Tensor (_, Float32) -> false | _ -> true) then
-          add "E_TENSOR_LANE_TYPE" "tensor lane extraction requires an f32 Tensor and returns f32";
-        (match src.layout with
-         | Some (Layout.Register _) -> ()
-         | _ -> add "E_TENSOR_LAYOUT" "tensor lane extraction requires a register layout")
-    | Warp_reduce_sum_f32 (dst, src) ->
+    | Warp_sum_f32 (dst, src) ->
         if dst.ty <> F32 || src.ty <> F32 then
           add "E_WARP_REDUCE_TYPE" "warp sum currently reduces f32 values and returns f32"
     | Barrier _ -> ()

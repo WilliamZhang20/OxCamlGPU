@@ -22,8 +22,7 @@ let map_uses replace = function
       Scale_tensor_f32 (dst, replace src, replace scalar)
   | Mul_tensor_f32 (dst, a, b) -> Mul_tensor_f32 (dst, replace a, replace b)
   | Reduce_sum_f32 (dst, src) -> Reduce_sum_f32 (dst, replace src)
-  | Tensor_lane_f32 (dst, src) -> Tensor_lane_f32 (dst, replace src)
-  | Warp_reduce_sum_f32 (dst, src) -> Warp_reduce_sum_f32 (dst, replace src)
+  | Warp_sum_f32 (dst, src) -> Warp_sum_f32 (dst, replace src)
   | Store_f32_grid_leader (ptr, value) ->
       Store_f32_grid_leader (replace ptr, replace value)
   | Barrier _ as i -> i

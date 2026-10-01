@@ -64,6 +64,11 @@ let () =
   let ro=make_value ~permission:Read_only 50 (Ptr(F32,Gpu_type.Global)) and v=make_value 51 F32 in
   let readonly_store={name="bad_store";args=[{name="p";value=ro}];body=[Const_f32(v,1.);Store_f32(ro,v)]} in
   expect_error "E_READONLY_STORE" (Verifier.verify_kernel readonly_store);
+  let writable_ptr = { ro with permission=Read_write } in
+  let early_return = {name="early_return";args=[{name="p";value=writable_ptr}];
+    body=[Const_f32(v,1.);Return None;Store_f32(writable_ptr,v)]} in
+  if not (contains (Ptx.emit early_return) "ret;\n  st.global.f32") then
+    failwith "explicit return must remain before subsequent effects in PTX";
   let wrong_load_result=make_value 97 I32 and one=make_value 98 I32 and sum_i=make_value 99 I32 in
   let load_result_mismatch={name="load_result_mismatch";args=[{name="p";value=ro}];body=[
       Load_f32(wrong_load_result,ro);Const_i32(one,1);Add_i32(sum_i,wrong_load_result,one)]} in
@@ -107,7 +112,7 @@ let () =
   expect_error "E_ACCESS_REQUIRED" (Verifier.check_call immutable_formal [actual ~permission:Read_only 90]);
   expect_ok (Verifier.check_call {immutable_formal with args=[{name="p";value=ro}]} [actual ~permission:Immutable 90]);
   let reg_layout = Layout.Register {
-    size_per_thread=[1]; threads_per_warp=[32]; warps_per_cta=[1]; order=[0] } in
+    elements_per_lane=[1]; lanes_per_subgroup=[32]; subgroups_per_cta=[1]; order=[0] } in
   let smem_layout = Layout.Shared { vector_width=1; order=[0]; swizzle=Layout.No_swizzle } in
   let shape=[Static 32] in
   let input=make_value ~locality:Global ~permission:Read_only 60
@@ -143,16 +148,23 @@ let () =
       Load_tensor(int_tensor,int_shared);Const_f32(int_factor,2.);
       Scale_tensor_f32(scaled_int,int_tensor,int_factor)]} in
   expect_error "E_TILE_ARITH_TYPE" (Verifier.verify_kernel bad_int_scale);
+  expect_error "E_TILE_ARITH_TYPE" (Verifier.verify_kernel
+    {bad_int_scale with body=[Shared_alloc int_shared;
+      Load_tensor(int_tensor,int_shared);Mul_tensor_f32(scaled_int,int_tensor,int_tensor)]});
   let missing_barrier={movement with body=List.filter (function Barrier _ -> false | _ -> true) movement.body} in
   expect_error "E_SHARED_SYNC" (Verifier.verify_kernel missing_barrier);
   let bad_layout=Layout.Register {
-    size_per_thread=[1]; threads_per_warp=[32]; warps_per_cta=[1]; order=[1] } in
+    elements_per_lane=[1]; lanes_per_subgroup=[32]; subgroups_per_cta=[1]; order=[1] } in
   let malformed={movement with body=[Load_tensor({from_global with layout=Some bad_layout},input)]} in
   expect_error "E_LAYOUT_INVALID" (Verifier.verify_kernel malformed);
   let global_with_register_layout={movement with
     args=[{name="input";value={input with layout=Some reg_layout}};{name="output";value=output}];body=[]} in
   expect_error "E_MEMREF_LAYOUT" (Verifier.verify_kernel global_with_register_layout);
   let movement_ptx=Ptx.emit movement in
+  let movement_target=Ptx.lower_to_ptx_ir movement in
+  if movement_target.Ptx_ir.launch.threads_per_cta <> Some (32,1,1) ||
+     movement_target.Ptx_ir.launch.static_shared_bytes <> 128 then
+    failwith "PTX target lowering must derive exact CTA and static shared-memory requirements";
   List.iter (fun part -> if not (contains movement_ptx part) then
     failwith ("shared movement PTX missing " ^ part))
     [".shared .align 16 .b8 __shared_62[128];";

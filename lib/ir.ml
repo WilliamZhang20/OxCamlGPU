@@ -21,11 +21,10 @@ type instr =
   | Load_tensor of value * value
   | Store_tensor of value * value
   | Scale_tensor_f32 of value * value * value
-  (* Shape-level operations retained until a target strategy is selected. *)
+  (* Semantic operations retained until target strategy selection. *)
   | Mul_tensor_f32 of value * value * value
   | Reduce_sum_f32 of value * value
-  | Tensor_lane_f32 of value * value
-  | Warp_reduce_sum_f32 of value * value
+  | Warp_sum_f32 of value * value
   | Store_f32_grid_leader of value * value
   | Barrier of Execution.level
   | Return of value option
@@ -57,8 +56,7 @@ let results = function
   | Scale_tensor_f32 (v, _, _) -> [v]
   | Mul_tensor_f32 (v, _, _) -> [v]
   | Reduce_sum_f32 (v, _) -> [v]
-  | Tensor_lane_f32 (v, _) -> [v]
-  | Warp_reduce_sum_f32 (v, _) -> [v]
+  | Warp_sum_f32 (v, _) -> [v]
   | Store_f32 _ | Store_f32_masked _ | Store_f32_grid_leader _ | Store_tensor _ | Barrier _ | Return _ -> []
 let operands = function
   | Const_i32 _ | Const_f32 _ | Thread_idx_x _ | Global_idx_x _ -> []
@@ -71,8 +69,7 @@ let operands = function
   | Scale_tensor_f32 (_, tensor, scalar) -> [tensor; scalar]
   | Mul_tensor_f32 (_, a, b) -> [a; b]
   | Reduce_sum_f32 (_, tensor) -> [tensor]
-  | Tensor_lane_f32 (_, tensor) -> [tensor]
-  | Warp_reduce_sum_f32 (_, tensor) -> [tensor]
+  | Warp_sum_f32 (_, value) -> [value]
   | Store_f32_grid_leader (ptr, value) -> [ptr; value]
   | Store_tensor (dst, src) -> [dst; src]
   | Return None -> [] | Return (Some v) -> [v]

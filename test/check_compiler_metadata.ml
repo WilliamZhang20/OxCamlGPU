@@ -5,7 +5,7 @@ let read_file path =
 
 let () =
   if Array.length Sys.argv <> 5 then failwith "usage: check_compiler_metadata SAXPY_METADATA VECTOR_ADD_METADATA LITERAL_METADATA DOT_METADATA";
-  let malformed = "format\t1\nkernel\tbad\narg\t0\tbuffer_f32\tunique\taliased\tnonportable\tread_write\nresult\tunit\taliased\tglobal\tnonportable\tread_write\n" in
+  let malformed = "format\t2\nkernel\tbad\narg\t0\tbuffer_f32\tunique\taliased\tnonportable\tread_write\nresult\tunit\taliased\tglobal\tnonportable\tread_write\n" in
   (match Gpu_metadata.parse malformed with
    | _ -> failwith "conflicting modes should be rejected by shared metadata parser"
    | exception Gpu_metadata.Parse_error _ -> ());
@@ -35,14 +35,14 @@ let () =
     failwith "OxCaml vector_add uniqueness did not reach GPU IR";
   if not (List.exists (function Ir.Const_f32 (_, 2.5) -> true | _ -> false) literal.body) then
     failwith "Typedtree float literal did not reach GPU IR";
-  if not (List.exists (function Ir.Warp_reduce_sum_f32 _ -> true | _ -> false) dot.body) ||
+  if not (List.exists (function Ir.Warp_sum_f32 _ -> true | _ -> false) dot.body) ||
      not (List.exists (function Ir.Store_f32_grid_leader _ -> true | _ -> false) dot.body) then
     failwith "OxCaml dot-product reduction did not reach verified GPU IR";
   if Gpu_type.string_of_ty (Gpu_type.Tensor ([Gpu_type.Static 128], Gpu_type.Float32)) <>
      "tensor<[128],f32>" then failwith "Tensor type shape/dtype printing changed";
-  if Execution.parent Execution.Lane <> Some Execution.Warp ||
-     Execution.parent Execution.Warp <> Some Execution.Warpgroup ||
-     Execution.parent Execution.Warpgroup <> Some Execution.Cta ||
-     Execution.parent Execution.Cta <> Some Execution.Grid then
+  if Execution.parent Execution.Lane <> Some Execution.Subgroup ||
+     Execution.parent Execution.Subgroup <> Some Execution.Cta ||
+     Execution.parent Execution.Cta <> Some Execution.Grid ||
+     Execution.parent Execution.Warpgroup <> None then
     failwith "GPU execution hierarchy is malformed";
   print_endline "OxCaml Typedtree bodies, modes, and literals lowered into verified GPU IR"

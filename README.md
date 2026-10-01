@@ -33,8 +33,8 @@ The integration currently works as a compiler invocation plus a small adapter, r
 
 1. The script compiles `lib/gpu_dsl.mli/.ml` once as a shared kernel API, then runs `ocamlc.opt -bin-annot` on each kernel `.ml`. Each function's mode-annotated type and body are captured in one `.cmt` Typedtree artifact. Dune's host OCaml build excludes `Gpu_dsl` because its mode annotations require OxCaml.
 2. It builds `tools/export_typedtree_modes.ml` against that same build's `ocamlcommon.cmxa`, `ocamlfrontend.cmxa`, and `oxcaml_common.cmxa`.
-3. The adapter reads each `.cmt` with `Cmt_format`, exports argument/result types and modes plus the supported function body as tab-separated `.gpu` metadata.
-4. `Oxcaml_frontend` and `Kernel_ast` import that metadata; the existing lowering, verifier, and PTX stages then run.
+3. The adapter reads each `.cmt` with `Cmt_format`, exports argument/result types and modes plus a versioned flat stream of typed operations as `.gpu` metadata. Each operation names its SSA result and typed operands; buffer arguments and pointer values are distinct references.
+4. `Oxcaml_frontend` and `Kernel_ast` import that stream into typed operations; `Kernel_frontend` lowers them into semantic GPU IR, followed by verification, optimization, target lowering, and PTX emission.
 
 The compiler and compiler-libs must come from the **same OxCaml build**: their artifact formats and Typedtree APIs are build-specific. Example:
 
@@ -70,7 +70,7 @@ Raw PTX entry points have no checked OxCaml launcher yet. Callers must uphold ea
 
 The current PTX ABI erases that MemRef shape to a device pointer; runtime extents and strides are not passed yet. The elementwise kernels use scalar-per-lane values and predicated accesses, while dot product reduces a full warp. The predicates check nonnegative indices and `index < bound`, but the verifier does not prove that the supplied bound is within the allocation extent. Ownership, locality, permission, and portability remain facts on IR values, separate from both the MemRef address space and Tensor shape.
 
-`Layout.Register` records size per thread, threads per warp, warps per CTA, and dimension order. `Layout.Shared` records vector width, dimension order, and an optional 32/64/128-byte swizzle.
+`Layout.Register` records logical elements per lane, lanes per subgroup, subgroups per CTA, and dimension order. These are distribution factors, not NVIDIA warp assumptions; target lowering maps a subgroup to hardware. `Layout.Shared` records vector width, dimension order, and an optional 32/64/128-byte swizzle.
 
 The verifier checks rank, positive factors, permutation validity, and exact coverage for static register-tile dimensions. `Shared_alloc`, `Load_tensor`, `Store_tensor`, and `Barrier Cta` are explicit IR operations; the straight-line verifier rejects shared reads before initialization or before a CTA barrier. Global MemRefs intentionally have no explicit layout descriptor yet.
 
@@ -78,7 +78,7 @@ The dot product source example is still a backend smoke test: its current OxCaml
 
 ### Execution Hierarchy
 
-`Execution` defines the separate scope hierarchy: `Grid → Cta → Warpgroup → Warp → Lane`. These levels describe execution coordinates/scopes and do not choose storage. `global_idx_x` combines CTA id, CTA width, and lane index. Warpgroup remains a target-defined grouping for future lowering.
+`Execution` defines the semantic scope hierarchy `Grid → Cta → Subgroup → Lane`. A `Warpgroup` is represented as an optional overlapping hardware grouping, not as a required parent of every subgroup. These levels describe execution scopes and do not choose storage. Target lowering maps subgroups to target-specific execution units.
 
 The importer preserves modal facts that OxCaml exposes in its typedtree. Kernel-call verification now checks locality, OxCaml domain portability, and GPU-boundary portability independently: a `global` formal requires a global-lifetime actual, while a `local` formal accepts either lifetime; a `portable` formal requires an actual explicitly marked portable in that same portability domain. OxCaml domain portability does not imply host/device portability. The current metadata adapter leaves GPU-boundary portability unspecified, so it cannot satisfy a GPU-boundary-portable formal without an explicit IR-side fact. The body importer currently supports only the source constructs used in these examples.
 
@@ -88,4 +88,4 @@ Run the semantic verifier and OxCaml bridge checks with `dune runtest`. The brid
 
 `bench/run.sh` builds the OxCaml kernels and compares vector_add/SAXPY with PyTorch operations. It also compares the 32-element OxGPU dot product with `torch.dot`, which uses PyTorch's CUDA dot implementation (cuBLAS for contiguous f32 vectors). The harness validates results before timing and reports CUDA-event medians. Elementwise kernels now take `n`, use `global_idx_x`, and mask tail loads/stores; the benchmark uses `N=1003` to exercise multiple blocks and a partial final block. Dot product still uses one full warp (`N=32`).
 
-The PTX backend remains small and supports only the operations used by these examples. Tensor and reduction lowering requires exactly one 32-thread, one-dimensional CTA; the backend emits `.reqntid 32, 1, 1`, which the CUDA driver enforces at launch. Launch indexing and predicated tails now work across multiple CTAs. The first `unique`-driven optimization reuses a prior load across a store only when alias analysis proves the store cannot alias the loaded buffer; the test checks that this removes one `ld.global` from PTX while the aliased case retains it.
+The PTX backend remains small and supports only the operations used by these examples. Target lowering produces a PTX IR distinct from semantic GPU IR and attaches a launch contract (CTA dimensions and static shared-memory bytes). Tensor and reduction lowering currently requires exactly one 32-thread, one-dimensional CTA; PTX emission writes `.reqntid 32, 1, 1`, which the CUDA driver enforces at launch. Launch indexing and predicated tails work across multiple CTAs. The first `unique`-driven optimization reuses a prior load across a store only when alias analysis proves the store cannot alias the loaded buffer; the test checks that this removes one `ld.global` from PTX while the aliased case retains it.
