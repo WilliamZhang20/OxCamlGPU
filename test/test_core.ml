@@ -49,9 +49,18 @@ let () =
     (Verifier.check_call modal_kernel [actual 105]);
   expect_ok (Verifier.check_call modal_kernel [actual ~domain_portability:Domain_portable
       ~gpu_boundary:Boundary_portable 105]);
+  let nonunit_signature : Oxcaml_frontend.signature = {
+    name="nonunit"; args=[];
+    result={ty=F32; ownership=Aliased; locality=Global;
+      domain_portability=Domain_nonportable; gpu_boundary=Boundary_unspecified;
+      permission=Read_only} } in
+  (try
+     ignore (Kernel_frontend.lower {Kernel_ast.name="nonunit";args=[];body=[]} nonunit_signature);
+     failwith "non-unit GPU kernel result unexpectedly lowered"
+   with Invalid_argument message when message = "GPU kernel entry points must return unit" -> ());
   let local = make_value ~locality:Local 40 (Ptr(F32,Gpu_type.Global)) in
   let returning = { kernel with name="bad_escape"; body=[Return(Some local)] } in
-  expect_error "E_LOCAL_ESCAPE" (Verifier.verify_kernel returning);
+  expect_error "E_KERNEL_RETURN_TYPE" (Verifier.verify_kernel returning);
   let ro=make_value ~permission:Read_only 50 (Ptr(F32,Gpu_type.Global)) and v=make_value 51 F32 in
   let readonly_store={name="bad_store";args=[{name="p";value=ro}];body=[Const_f32(v,1.);Store_f32(ro,v)]} in
   expect_error "E_READONLY_STORE" (Verifier.verify_kernel readonly_store);
@@ -71,6 +80,14 @@ let () =
       Gep_f32(masked_ptr,ro,mask_index);
       Load_f32_masked(masked_value,masked_ptr,wrong_index,mask_bound)]} in
   expect_error "E_MASK_INDEX" (Verifier.verify_kernel bad_mask);
+  let good_mask={bad_mask with name="good_mask";body=[
+      Const_i32(mask_index,0);Const_i32(mask_bound,2);
+      Gep_f32(masked_ptr,ro,mask_index);
+      Load_f32_masked(masked_value,masked_ptr,mask_index,mask_bound)]} in
+  let masked_ptx=Ptx.emit good_mask in
+  if not (contains masked_ptx "setp.ge.s32 %pred1, %r52, 0;" &&
+          contains masked_ptx "and.pred %pred0, %pred0, %pred1;") then
+    failwith "masked access PTX must reject negative indices";
   let forged = { ro with permission=Read_write } in
   let forged_store={readonly_store with body=[Const_f32(v,1.);Store_f32(forged,v)]} in
   expect_error "E_VALUE_IDENTITY" (Verifier.verify_kernel forged_store);
@@ -139,7 +156,7 @@ let () =
   List.iter (fun part -> if not (contains movement_ptx part) then
     failwith ("shared movement PTX missing " ^ part))
     [".shared .align 16 .b8 __shared_62[128];";
-     "ld.global.f32";"st.shared.f32";"bar.sync 0;";"ld.shared.f32";"st.global.f32"];
+     ".reqntid 32, 1, 1";"ld.global.f32";"st.shared.f32";"bar.sync 0;";"ld.shared.f32";"st.global.f32"];
   let x=make_value ~locality:Global ~permission:Read_only 90 (MemRef(shape,Float32,Gpu_type.Global))
   and y=make_value ~locality:Global ~permission:Read_only 91 (MemRef(shape,Float32,Gpu_type.Global))
   and result=make_value ~ownership:Unique ~locality:Global ~permission:Write_only 92
@@ -156,6 +173,8 @@ let () =
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("lowered dot PTX missing " ^ part))
     [".reqntid 32, 1, 1";"ld.global.f32";"mul.f32";"shfl.sync.bfly.b32";"st.global.f32"];
+  List.iter (fun part -> if not (contains dot_ptx part) then
+    failwith ("grid-leader predicate missing " ^ part)) ["%tid.y";"%tid.z"];
   let alias_sensitive_kernel y_ownership =
     let source=make_value ~provenance:(Some 110) ~permission:Read_only 110
         (Ptr(F32,Gpu_type.Global))

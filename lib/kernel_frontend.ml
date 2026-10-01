@@ -3,6 +3,8 @@ open Mode
 open Ir
 
 let lower (source : Kernel_ast.t) (signature : Oxcaml_frontend.signature) =
+  if signature.result.ty <> Gpu_type.Unit then
+    invalid_arg "GPU kernel entry points must return unit";
   if List.length source.args <> List.length signature.args then invalid_arg "source/signature arity mismatch";
   let next = ref (List.length signature.args) in
   let fresh ?(loc=Mode.Local) ty =

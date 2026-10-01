@@ -12,3 +12,7 @@
  (name emit_ptx)
  (modules emit_ptx)
  (libraries oxgpu))
+
+(rule
+ (alias runtest)
+ (action (run %{workspace_root}/test/run_oxcaml_tests.sh)))

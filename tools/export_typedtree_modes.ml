@@ -4,23 +4,25 @@ open Typedtree
 
 let fail message = prerr_endline message; exit 2
 
-let tokens mode =
-  String.split_on_char ',' mode |> List.map String.trim
-
-let choose axis options values =
-  match List.filter (fun option -> List.mem option values) options with
-  | [value] -> value
-  | [] -> fail ("Typedtree mode did not expose the " ^ axis ^ " axis: " ^ String.concat "," values)
-  | _ -> fail ("Typedtree mode exposed conflicting values for " ^ axis ^ ": " ^ String.concat "," values)
-
 let serialize_arrow_mode mode =
   let modes = Mode.With_locality.to_const_exn mode in
-  let values = tokens (Format_doc.asprintf "%a" Mode.With_locality.Const.print modes) in
-  [ choose "uniqueness" ["unique"; "aliased"] values;
-    choose "locality" ["local"; "global"] values;
-    choose "portability" ["portable"; "nonportable"] values;
-    choose "visibility" ["read_write"; "read"; "write"; "immutable"] values ]
-  |> String.concat "\t"
+  let uniqueness = match modes.uniqueness with
+    | Mode.Uniqueness.Const.Unique -> "unique"
+    | Mode.Uniqueness.Const.Aliased -> "aliased" in
+  let locality = match modes.areality with
+    | Mode.Locality.Const.Local -> "local"
+    | Mode.Locality.Const.Global -> "global" in
+  let portability = match modes.portability with
+    | Mode.Portability.Const.Portable -> "portable"
+    | Mode.Portability.Const.Nonportable -> "nonportable"
+    | Mode.Portability.Const.Shareable | Mode.Portability.Const.Corruptible ->
+        fail "OxCaml shareable/corruptible portability is not represented by the GPU mode model" in
+  let visibility = match modes.visibility with
+    | Mode.Visibility.Const.Read_write -> "read_write"
+    | Mode.Visibility.Const.Read -> "read"
+    | Mode.Visibility.Const.Write -> "write"
+    | Mode.Visibility.Const.Immutable -> "immutable" in
+  String.concat "\t" [uniqueness; locality; portability; visibility]
 
 (* Keep the exporter independent of OxCamlGPU's runtime modules. *)
 type kernel_expr =

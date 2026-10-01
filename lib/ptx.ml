@@ -66,6 +66,10 @@ let emit kernel =
   let kernel = lower_reductions kernel in
   Verifier.verify_exn kernel;
   let has_warp_reduction = List.exists (function Warp_reduce_sum_f32 _ -> true | _ -> false) kernel.body in
+  let needs_one_warp_block = has_warp_reduction || List.exists (function
+    | Load_tensor _ | Store_tensor _ | Scale_tensor_f32 _ | Mul_tensor_f32 _
+    | Tensor_lane_f32 _ | Shared_alloc _ -> true
+    | _ -> false) kernel.body in
   if has_warp_reduction && List.exists (function Global_idx_x _ -> true | _ -> false) kernel.body then
     invalid_arg "the current warp reduction is CTA-local and cannot consume global_idx_x values";
   let max_id = maximum_value_id kernel in
@@ -120,7 +124,7 @@ let emit kernel =
   List.iteri (fun i arg ->
     line (Printf.sprintf "  .param .%s %%arg%d%s" (param_type arg.value.ty) i
       (if i + 1 = List.length kernel.args then "" else ","))) kernel.args;
-  line (if has_warp_reduction then ") .reqntid 32, 1, 1" else ")");
+  line (if needs_one_warp_block then ") .reqntid 32, 1, 1" else ")");
   line "{";
   Hashtbl.iter (fun _ symbol -> line ("  .shared .align 16 .b8 " ^ symbol ^ "[128];")) shared_symbols;
   line "  .reg .pred %pred<8>;";
@@ -165,12 +169,16 @@ let emit kernel =
     | Mul_f32 (dst, a, c) -> line (Printf.sprintf "  mul.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
     | Load_f32 (dst, ptr) -> line (Printf.sprintf "  ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
     | Load_f32_masked (dst, ptr, ix, bound) ->
+        line (Printf.sprintf "  setp.ge.s32 %%pred1, %s, 0;" (reg ix));
         line (Printf.sprintf "  setp.lt.s32 %%pred0, %s, %s;" (reg ix) (reg bound));
+        line "  and.pred %pred0, %pred0, %pred1;";
         line (Printf.sprintf "  mov.f32 %s, 0f00000000;" (freg dst));
         line (Printf.sprintf "  @%%pred0 ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
     | Store_f32 (ptr, value) -> line (Printf.sprintf "  st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
     | Store_f32_masked (ptr, value, ix, bound) ->
+        line (Printf.sprintf "  setp.ge.s32 %%pred1, %s, 0;" (reg ix));
         line (Printf.sprintf "  setp.lt.s32 %%pred0, %s, %s;" (reg ix) (reg bound));
+        line "  and.pred %pred0, %pred0, %pred1;";
         line (Printf.sprintf "  @%%pred0 st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
     | Shared_alloc _ -> ()
     | Load_tensor (tensor, memref) ->
@@ -198,9 +206,15 @@ let emit kernel =
     | Store_f32_grid_leader (ptr, value) ->
         line (Printf.sprintf "  mov.u32 %s, %%tid.x;" tid_scratch);
         line (Printf.sprintf "  setp.eq.u32 %%pred0, %s, 0;" tid_scratch);
+        line (Printf.sprintf "  mov.u32 %s, %%tid.y;" tid_scratch);
+        line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" tid_scratch);
+        line "  and.pred %pred2, %pred0, %pred1;";
+        line (Printf.sprintf "  mov.u32 %s, %%tid.z;" tid_scratch);
+        line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" tid_scratch);
+        line "  and.pred %pred2, %pred2, %pred1;";
         line (Printf.sprintf "  mov.u32 %s, %%ctaid.x;" (b32_scratch cta_scratch_id));
         line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" (b32_scratch cta_scratch_id));
-        line "  and.pred %pred2, %pred0, %pred1;";
+        line "  and.pred %pred2, %pred2, %pred1;";
         line (Printf.sprintf "  mov.u32 %s, %%ctaid.y;" (b32_scratch cta_scratch_id));
         line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" (b32_scratch cta_scratch_id));
         line "  and.pred %pred2, %pred2, %pred1;";
@@ -210,7 +224,8 @@ let emit kernel =
         line (Printf.sprintf "  @%%pred2 st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
     | Barrier Execution.Cta -> line "  bar.sync 0;"
     | Barrier _ -> assert false
-    | Return _ -> line "  ret;") kernel.body;
+    | Return None -> line "  ret;"
+    | Return (Some _) -> invalid_arg "PTX kernel entry points cannot return a value") kernel.body;
   line "  ret;";
   line "}";
   Buffer.contents b

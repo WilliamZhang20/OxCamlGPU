@@ -203,7 +203,7 @@ let verify_kernel k =
         if dst.ty <> F32 || src.ty <> F32 then
           add "E_WARP_REDUCE_TYPE" "warp sum currently reduces f32 values and returns f32"
     | Barrier _ -> ()
-    | Return (Some v) when v.locality = Local -> add "E_LOCAL_ESCAPE" (Printf.sprintf "local value %d escapes kernel scope" v.id)
+    | Return (Some _) -> add "E_KERNEL_RETURN_TYPE" "GPU kernel entry points must return unit"
     | _ -> ()) k.body;
   (* The current IR is straight-line. A CTA barrier is required between a
      shared-memory tile write and a later read, which is conservative even

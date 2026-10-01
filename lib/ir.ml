@@ -33,6 +33,9 @@ type instr =
 type arg = { name : string; value : value }
 type kernel = { name : string; args : arg list; body : instr list }
 type actual = {
+  (* Identifies the complete backing allocation. Distinct ids are a caller
+     assertion that the allocations do not overlap; the raw CUDA ABI cannot
+     verify ranges because it currently passes pointers without extents. *)
   buffer_id : int;
   actual_ownership : ownership;
   actual_permission : permission;

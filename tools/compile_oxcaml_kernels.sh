@@ -33,6 +33,16 @@ if [[ -z "$root" ]]; then
   fi
 fi
 
+if [[ -n "$root" && -e "$root/.git" && "${OXCAML_ALLOW_UNPINNED:-0}" != 1 ]]; then
+  expected_revision="$(<tools/oxcaml-revision)"
+  actual_revision="$(git -C "$root" rev-parse HEAD)"
+  if [[ "$actual_revision" != "$expected_revision" ]]; then
+    echo "OxCaml revision $actual_revision is not the tested revision $expected_revision." >&2
+    echo "Set OXCAML_ALLOW_UNPINNED=1 only after validating the adapter against another revision." >&2
+    exit 1
+  fi
+fi
+
 if [[ -z "$native_compiler" ]]; then
   if [[ -n "$root" ]]; then
     native_compiler="$root/_build/_bootinstall/bin/ocamlopt.opt"
