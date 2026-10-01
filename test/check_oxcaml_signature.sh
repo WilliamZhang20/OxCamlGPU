@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="${OXCAML_ROOT:-$HOME/src/oxcaml-src}"
-compiler="${OXCC:-$root/_build/_bootinstall/bin/ocamlc.opt}"
+root="${OXCAML_ROOT:-}"
+compiler="${OXCC:-}"
+if [[ -z "$compiler" ]]; then
+  if [[ -n "$root" ]]; then
+    compiler="$root/_build/_bootinstall/bin/ocamlc.opt"
+  else
+    compiler="$(command -v ocamlc.opt || true)"
+  fi
+fi
+if [[ -z "$compiler" ]]; then
+  echo "OxCaml bytecode compiler not found. Set OXCC or OXCAML_ROOT." >&2
+  exit 1
+fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 

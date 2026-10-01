@@ -1,2 +1,11 @@
 _build/
 __pycache__/
+*.cmi
+*.cmo
+*.cmx
+*.cmxa
+*.cma
+*.cmt
+*.cmti
+*.o
+*.a

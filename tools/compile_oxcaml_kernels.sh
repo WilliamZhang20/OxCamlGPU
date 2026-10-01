@@ -8,11 +8,45 @@ fi
 out="$1"
 mkdir -p "$out"
 
-root="${OXCAML_ROOT:-$HOME/src/oxcaml-src}"
-main_build="${OXCAML_MAIN_BUILD:-$root/_build/main}"
-stdlib_dir="${OXCAML_STDLIB_DIR:-$root/_build/runtime_stdlib_install/lib/ocaml_runtime_stdlib}"
-compiler="${OXCC:-$root/_build/_bootinstall/bin/ocamlc.opt}"
-native_compiler="${OXOPT:-$root/_build/_bootinstall/bin/ocamlopt.opt}"
+root="${OXCAML_ROOT:-}"
+compiler="${OXCC:-}"
+native_compiler="${OXOPT:-}"
+
+if [[ -z "$compiler" ]]; then
+  if [[ -n "$root" ]]; then
+    compiler="$root/_build/_bootinstall/bin/ocamlc.opt"
+  else
+    compiler="$(command -v ocamlc.opt || true)"
+  fi
+fi
+if [[ -z "$compiler" ]]; then
+  echo "OxCaml bytecode compiler not found. Set OXCC or OXCAML_ROOT." >&2
+  exit 1
+fi
+
+# If OXCC points into OxCaml's conventional build tree, infer the source root.
+# Installed compilers can instead be paired with explicit compiler-libs paths.
+if [[ -z "$root" ]]; then
+  build_suffix="/_build/_bootinstall/bin/ocamlc.opt"
+  if [[ "$compiler" == *"$build_suffix" ]]; then
+    root="${compiler%$build_suffix}"
+  fi
+fi
+
+if [[ -z "$native_compiler" ]]; then
+  if [[ -n "$root" ]]; then
+    native_compiler="$root/_build/_bootinstall/bin/ocamlopt.opt"
+  else
+    native_compiler="$(command -v ocamlopt.opt || true)"
+  fi
+fi
+main_build="${OXCAML_MAIN_BUILD:-${root:+$root/_build/main}}"
+stdlib_dir="${OXCAML_STDLIB_DIR:-${root:+$root/_build/runtime_stdlib_install/lib/ocaml_runtime_stdlib}}"
+
+if [[ -z "$main_build" || -z "$stdlib_dir" ]]; then
+  echo "OxCaml compiler-libs paths are unknown. Set OXCAML_ROOT or both OXCAML_MAIN_BUILD and OXCAML_STDLIB_DIR." >&2
+  exit 1
+fi
 
 for path in "$compiler" "$native_compiler" "$main_build/ocamlcommon.cmxa" \
   "$main_build/ocamlfrontend.cmxa" "$main_build/oxcaml_common.cmxa" \

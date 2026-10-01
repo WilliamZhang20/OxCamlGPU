@@ -16,14 +16,18 @@ Kernel_frontend → Ir → Verifier → Optimizer → PTX backend
 
 ## OxCaml integration
 
-OxCaml is built locally from source at `$HOME/src/oxcaml-src` (currently `/home/wzhang20/src/oxcaml-src`). It is **not installed globally or into the project's opam switch**. The compiler entry points used here are:
+The adapter must use an OxCaml compiler and compiler-libs from the same build, since its Typedtree format and APIs are build-specific. `tools/compile_oxcaml_kernels.sh` accepts either a source build root with the conventional OxCaml layout, or explicit paths to an OxCaml installation:
 
 ```text
-$HOME/src/oxcaml-src/_build/_bootinstall/bin/ocamlc.opt
-$HOME/src/oxcaml-src/_build/_bootinstall/bin/ocamlopt.opt
+OXCAML_ROOT=/path/to/oxcaml-src
+# or, for a nonstandard/installed layout:
+OXCC=/path/to/ocamlc.opt
+OXOPT=/path/to/ocamlopt.opt
+OXCAML_MAIN_BUILD=/path/to/matching/compiler-libs
+OXCAML_STDLIB_DIR=/path/to/matching/stdlib
 ```
 
-Those are build-tree symlinks to OxCaml's native compiler executables. The matching compiler-libs used to build the Typedtree adapter are in `$HOME/src/oxcaml-src/_build/main`; the matching standard library artifacts are in `$HOME/src/oxcaml-src/_build/runtime_stdlib_install/lib/ocaml_runtime_stdlib`. `tools/compile_oxcaml_kernels.sh` defaults to this path via `OXCAML_ROOT=$HOME/src/oxcaml-src`.
+When `ocamlc.opt` and `ocamlopt.opt` are on `PATH`, the script discovers the compiler executables. If their location identifies the conventional OxCaml build tree, it also derives the compiler-libs and standard-library paths. Otherwise set `OXCAML_ROOT`, or provide all four explicit paths above. The repository does not assume a particular user's home directory or keep compiler build products under version control.
 
 The integration currently works as a compiler invocation plus a small adapter, rather than embedding OxCaml inside OxCamlGPU:
 
@@ -32,7 +36,7 @@ The integration currently works as a compiler invocation plus a small adapter, r
 3. The adapter reads each `.cmt` with `Cmt_format`, exports argument/result types and modes plus the supported function body as tab-separated `.gpu` metadata.
 4. `Oxcaml_frontend` and `Kernel_ast` import that metadata; the existing lowering, verifier, and PTX stages then run.
 
-The compiler and compiler-libs must come from the **same OxCaml build**: their artifact formats and Typedtree APIs are build-specific. For another local build, set `OXCAML_ROOT` or override all paths with `OXCAML_MAIN_BUILD`, `OXCAML_STDLIB_DIR`, `OXCC`, and `OXOPT`. Example:
+The compiler and compiler-libs must come from the **same OxCaml build**: their artifact formats and Typedtree APIs are build-specific. Example:
 
 ```sh
 tools/compile_oxcaml_kernels.sh /tmp/oxgpu-metadata
