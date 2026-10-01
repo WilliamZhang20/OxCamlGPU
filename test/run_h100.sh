@@ -12,8 +12,12 @@ tools/compile_oxcaml_kernels.sh "$metadata_dir"
 dune exec examples/vector_add.exe -- "$metadata_dir/vector_add.gpu" > /tmp/oxgpu-vector-add.ptx
 dune exec examples/saxpy.exe -- "$metadata_dir/saxpy.gpu" > /tmp/oxgpu-saxpy.ptx
 dune exec examples/dot_product.exe -- "$metadata_dir/dot_product.gpu" > /tmp/oxgpu-dot-product.ptx
+dune exec test/emit_ptx.exe -- "$metadata_dir/unique_reuse.gpu" > /tmp/oxgpu-unique-reuse.ptx
+dune exec test/emit_ptx.exe -- "$metadata_dir/alias_reuse_aliased.gpu" > /tmp/oxgpu-alias-reuse-aliased.ptx
 ptxas -arch=sm_90 /tmp/oxgpu-vector-add.ptx -o /tmp/oxgpu-vector-add.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-saxpy.ptx -o /tmp/oxgpu-saxpy.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-dot-product.ptx -o /tmp/oxgpu-dot-product.cubin
+ptxas -arch=sm_90 /tmp/oxgpu-unique-reuse.ptx -o /tmp/oxgpu-unique-reuse.cubin
+ptxas -arch=sm_90 /tmp/oxgpu-alias-reuse-aliased.ptx -o /tmp/oxgpu-alias-reuse-aliased.cubin
 nvcc -O2 test/run_h100.cu -lcuda -o /tmp/oxgpu-run-h100
-/tmp/oxgpu-run-h100 /tmp/oxgpu-vector-add.cubin /tmp/oxgpu-saxpy.cubin /tmp/oxgpu-dot-product.cubin
+/tmp/oxgpu-run-h100 /tmp/oxgpu-vector-add.cubin /tmp/oxgpu-saxpy.cubin /tmp/oxgpu-dot-product.cubin /tmp/oxgpu-unique-reuse.cubin /tmp/oxgpu-alias-reuse-aliased.cubin

@@ -26,6 +26,26 @@ let maximum_value_id kernel =
 
 let require condition message = if not condition then invalid_arg message
 
+let is_warp_reduction_input value =
+  value.ty = Gpu_type.Tensor ([Gpu_type.Static 32], Gpu_type.Float32)
+  && value.layout = Some (Layout.Register {
+       size_per_thread=[1]; threads_per_warp=[32]; warps_per_cta=[1]; order=[0] })
+
+(* Target legalization belongs with the PTX backend: this is a strategy choice
+   for this target, not a source/semantic IR pass. *)
+let lower_reductions kernel =
+  let next_id = ref (1 + List.fold_left max (-1)
+      (List.map (fun arg -> arg.value.id) kernel.args @
+       List.concat_map (fun instr -> List.map (fun v -> v.id) (results instr)) kernel.body)) in
+  let fresh ty = let id = !next_id in incr next_id; make_value id ty in
+  { kernel with body=List.concat_map (function
+      | Reduce_sum_f32 (dst, src) ->
+          if not (is_warp_reduction_input src) then
+            invalid_arg "PTX reduction requires Tensor<[32], f32> with one element per lane in one warp";
+          let lane_value = fresh Gpu_type.F32 in
+          [Tensor_lane_f32 (lane_value, src); Warp_reduce_sum_f32 (dst, lane_value)]
+      | instruction -> [instruction]) kernel.body }
+
 let require_register_layout value = match value.ty, value.layout with
   | Gpu_type.Tensor ([Gpu_type.Static 32], Gpu_type.Float32),
     Some (Layout.Register { size_per_thread=[1]; threads_per_warp=[32];
@@ -43,11 +63,25 @@ let require_global_tile value = match value.ty, value.layout with
 
 let emit kernel =
   Verifier.verify_exn kernel;
+  let kernel = lower_reductions kernel in
+  Verifier.verify_exn kernel;
+  let has_warp_reduction = List.exists (function Warp_reduce_sum_f32 _ -> true | _ -> false) kernel.body in
+  if has_warp_reduction && List.exists (function Global_idx_x _ -> true | _ -> false) kernel.body then
+    invalid_arg "the current warp reduction is CTA-local and cannot consume global_idx_x values";
   let max_id = maximum_value_id kernel in
-  let tid_scratch = "%r" ^ string_of_int (max_id + 1) in
   let offset_scratch = "%rd" ^ string_of_int (max_id + 2) in
   let address_scratch = "%rd" ^ string_of_int (max_id + 3) in
+  (* Values occupy ids [0..max_id]. Reserve scratch ids explicitly by role:
+     tid, CTA id, CTA width, then two distinct warp-reduction temporaries. *)
+  let tid_scratch_id = max_id + 1 in
+  let cta_scratch_id = max_id + 2 in
+  let width_scratch_id = max_id + 3 in
+  let reduction_bits_scratch_id = max_id + 4 in
+  let reduction_value_scratch_id = max_id + 5 in
   let register_count = max_id + 6 in
+  let b32_scratch id = "%r" ^ string_of_int id in
+  let f32_scratch id = "%f" ^ string_of_int id in
+  let tid_scratch = b32_scratch tid_scratch_id in
   let shared_symbols = Hashtbl.create 4 in
   List.iter (function
     | Shared_alloc memref ->
@@ -66,23 +100,27 @@ let emit kernel =
          | Gpu_type.MemRef (_, _, Gpu_type.Global) -> require_global_tile memref
         | _ -> invalid_arg "PTX tile store destination must be global or shared memory")
     | Scale_tensor_f32 (dst, src, _) -> require_register_layout dst; require_register_layout src
+    | Mul_tensor_f32 (dst, a, c) ->
+        require_register_layout dst; require_register_layout a; require_register_layout c
+    | Reduce_sum_f32 _ -> invalid_arg "unlowered shape-level reduction reached PTX emission"
+    | Tensor_lane_f32 (_, src) -> require_register_layout src
     | Warp_reduce_sum_f32 (_, src) -> require (src.ty = Gpu_type.F32) "warp sum requires f32 lane values"
-    | Store_f32_lane0 (ptr, value) ->
-        require (is_pointer ptr.ty) "lane-zero store requires a global f32 buffer";
-        require (value.ty = Gpu_type.F32) "lane-zero store value must be f32"
-    | Barrier Gpu_type.Cta -> ()
+    | Store_f32_grid_leader (ptr, value) ->
+        require (is_pointer ptr.ty) "grid-leader store requires a global f32 buffer";
+        require (value.ty = Gpu_type.F32) "grid-leader store value must be f32"
+    | Barrier Execution.Cta -> ()
     | Barrier _ -> invalid_arg "PTX tile movement currently supports CTA barriers only"
     | _ -> ()) kernel.body;
   let b = Buffer.create 1024 in
   let line s = Buffer.add_string b (s ^ "\n") in
-  line ".version 8.7";
+  line ".version 8.5";
   line ".target sm_90";
   line ".address_size 64";
   line (".visible .entry " ^ kernel.name ^ "(");
   List.iteri (fun i arg ->
     line (Printf.sprintf "  .param .%s %%arg%d%s" (param_type arg.value.ty) i
       (if i + 1 = List.length kernel.args then "" else ","))) kernel.args;
-  line ")";
+  line (if has_warp_reduction then ") .reqntid 32, 1, 1" else ")");
   line "{";
   Hashtbl.iter (fun _ symbol -> line ("  .shared .align 16 .b8 " ^ symbol ^ "[128];")) shared_symbols;
   line "  .reg .pred %pred<8>;";
@@ -113,6 +151,12 @@ let emit kernel =
     | Const_f32 (value, f) ->
         line (Printf.sprintf "  mov.f32 %s, 0f%08lx;" (freg value) (Int32.bits_of_float f))
     | Thread_idx_x value -> line (Printf.sprintf "  mov.u32 %s, %%tid.x;" (reg value))
+    | Global_idx_x value ->
+        line (Printf.sprintf "  mov.u32 %s, %%tid.x;" tid_scratch);
+        line (Printf.sprintf "  mov.u32 %s, %%ctaid.x;" (b32_scratch cta_scratch_id));
+        line (Printf.sprintf "  mov.u32 %s, %%ntid.x;" (b32_scratch width_scratch_id));
+        line (Printf.sprintf "  mad.lo.u32 %s, %s, %s, %s;" (reg value)
+          (b32_scratch cta_scratch_id) (b32_scratch width_scratch_id) tid_scratch)
     | Gep_f32 (dst, base, index) ->
         line (Printf.sprintf "  mul.wide.u32 %s, %s, 4;" offset_scratch (reg index));
         line (Printf.sprintf "  add.u64 %s, %s, %s;" (ptrreg dst) (ptrreg base) offset_scratch)
@@ -120,7 +164,14 @@ let emit kernel =
     | Add_f32 (dst, a, c) -> line (Printf.sprintf "  add.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
     | Mul_f32 (dst, a, c) -> line (Printf.sprintf "  mul.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
     | Load_f32 (dst, ptr) -> line (Printf.sprintf "  ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
+    | Load_f32_masked (dst, ptr, ix, bound) ->
+        line (Printf.sprintf "  setp.lt.s32 %%pred0, %s, %s;" (reg ix) (reg bound));
+        line (Printf.sprintf "  mov.f32 %s, 0f00000000;" (freg dst));
+        line (Printf.sprintf "  @%%pred0 ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
     | Store_f32 (ptr, value) -> line (Printf.sprintf "  st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
+    | Store_f32_masked (ptr, value, ix, bound) ->
+        line (Printf.sprintf "  setp.lt.s32 %%pred0, %s, %s;" (reg ix) (reg bound));
+        line (Printf.sprintf "  @%%pred0 st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
     | Shared_alloc _ -> ()
     | Load_tensor (tensor, memref) ->
         let space = emit_tile_address memref in
@@ -130,20 +181,34 @@ let emit kernel =
         line (Printf.sprintf "  st.%s.f32 [%s], %s;" space address_scratch (freg tensor))
     | Scale_tensor_f32 (dst, src, scalar) ->
         line (Printf.sprintf "  mul.f32 %s, %s, %s;" (freg dst) (freg src) (freg scalar))
+    | Mul_tensor_f32 (dst, a, c) ->
+        line (Printf.sprintf "  mul.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
+    | Reduce_sum_f32 _ -> assert false
+    | Tensor_lane_f32 (dst, src) ->
+        line (Printf.sprintf "  mov.f32 %s, %s;" (freg dst) (freg src))
     | Warp_reduce_sum_f32 (dst, src) ->
-        let peer_bits = "%r" ^ string_of_int (max_id + 4) in
-        let peer_value = "%f" ^ string_of_int (max_id + 5) in
+        let peer_bits = b32_scratch reduction_bits_scratch_id in
+        let peer_value = f32_scratch reduction_value_scratch_id in
         line (Printf.sprintf "  mov.f32 %s, %s;" (freg dst) (freg src));
         List.iter (fun lane_delta ->
           line (Printf.sprintf "  mov.b32 %s, %s;" peer_bits (freg dst));
           line (Printf.sprintf "  shfl.sync.bfly.b32 %s, %s, %d, 31, 0xffffffff;" peer_bits peer_bits lane_delta);
           line (Printf.sprintf "  mov.b32 %s, %s;" peer_value peer_bits);
           line (Printf.sprintf "  add.f32 %s, %s, %s;" (freg dst) (freg dst) peer_value)) [16;8;4;2;1]
-    | Store_f32_lane0 (ptr, value) ->
+    | Store_f32_grid_leader (ptr, value) ->
         line (Printf.sprintf "  mov.u32 %s, %%tid.x;" tid_scratch);
         line (Printf.sprintf "  setp.eq.u32 %%pred0, %s, 0;" tid_scratch);
-        line (Printf.sprintf "  @%%pred0 st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
-    | Barrier Cta -> line "  bar.sync 0;"
+        line (Printf.sprintf "  mov.u32 %s, %%ctaid.x;" (b32_scratch cta_scratch_id));
+        line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" (b32_scratch cta_scratch_id));
+        line "  and.pred %pred2, %pred0, %pred1;";
+        line (Printf.sprintf "  mov.u32 %s, %%ctaid.y;" (b32_scratch cta_scratch_id));
+        line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" (b32_scratch cta_scratch_id));
+        line "  and.pred %pred2, %pred2, %pred1;";
+        line (Printf.sprintf "  mov.u32 %s, %%ctaid.z;" (b32_scratch cta_scratch_id));
+        line (Printf.sprintf "  setp.eq.u32 %%pred1, %s, 0;" (b32_scratch cta_scratch_id));
+        line "  and.pred %pred2, %pred2, %pred1;";
+        line (Printf.sprintf "  @%%pred2 st.global.f32 [%s], %s;" (ptrreg ptr) (freg value))
+    | Barrier Execution.Cta -> line "  bar.sync 0;"
     | Barrier _ -> assert false
     | Return _ -> line "  ret;") kernel.body;
   line "  ret;";

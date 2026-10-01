@@ -7,4 +7,4 @@ let dot_product :
   unit = fun x y result ->
   let lane = Gpu.thread_idx_x () in
   let product = Gpu.load x lane *. Gpu.load y lane in
-  Gpu.store_lane0 result (Gpu.warp_sum_f32 product)
+  Gpu.store_grid_leader result (Gpu.warp_sum_f32 product)

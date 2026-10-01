@@ -4,17 +4,6 @@ type dtype = Int32 | Float32
 type dim = Static of int | Symbol of string | Dynamic
 type shape = dim list
 
-(* This hierarchy describes execution coordinates/scopes; it is independent of
-   memory address spaces. Warpgroup is an optional target-defined level. *)
-type execution_level = Grid | Cta | Warpgroup | Warp | Lane
-
-let parent_level = function
-  | Grid -> None
-  | Cta -> Some Grid
-  | Warpgroup -> Some Cta
-  | Warp -> Some Warpgroup
-  | Lane -> Some Warp
-
 type ty =
   | I32
   | F32

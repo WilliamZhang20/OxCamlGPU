@@ -17,3 +17,22 @@ let satisfies ~required actual =
   (not (can_read required) || can_read actual) &&
   (not (can_write required) || can_write actual) &&
   (required <> Immutable || actual = Immutable)
+
+(* A value that can outlive the region is usable where only a local lifetime
+   is required; a region-local value cannot satisfy a global-lifetime formal. *)
+let locality_satisfies ~required actual =
+  match required, actual with
+  | Local, _ | Global, Global -> true
+  | Global, Local -> false
+
+let domain_portability_satisfies ~required actual =
+  match required, actual with
+  | Domain_portable, Domain_portable -> true
+  | Domain_portable, (Domain_nonportable | Domain_portability_unspecified) -> false
+  | (Domain_nonportable | Domain_portability_unspecified), _ -> true
+
+let gpu_boundary_satisfies ~required actual =
+  match required, actual with
+  | Boundary_portable, Boundary_portable -> true
+  | Boundary_portable, (Boundary_local | Boundary_unspecified) -> false
+  | (Boundary_local | Boundary_unspecified), _ -> true

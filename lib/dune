@@ -1,4 +1,4 @@
 (library
  (name oxgpu)
- (modules gpu_type mode layout ir gpu_metadata verifier ptx kernel_ast kernel_frontend oxcaml_frontend)
+ (modules execution gpu_type mode layout ir gpu_metadata verifier optimizer ptx compiler kernel_ast kernel_frontend oxcaml_frontend)
  (wrapped false))

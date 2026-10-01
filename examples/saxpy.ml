@@ -7,4 +7,4 @@ let () =
   let metadata = read_file Sys.argv.(1) in
   let signature = Oxcaml_frontend.parse_typedtree_metadata metadata in
   let source = Kernel_ast.of_compiler_metadata metadata in
-  print_string (Ptx.emit (Kernel_frontend.lower source signature))
+  print_string (Compiler.compile_ptx (Kernel_frontend.lower source signature))

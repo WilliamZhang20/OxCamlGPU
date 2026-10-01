@@ -7,3 +7,8 @@
  (name check_compiler_metadata)
  (modules check_compiler_metadata)
  (libraries oxgpu))
+
+(executable
+ (name emit_ptx)
+ (modules emit_ptx)
+ (libraries oxgpu))

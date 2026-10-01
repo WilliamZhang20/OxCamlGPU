@@ -20,6 +20,10 @@ let () =
   let saxpy=check Sys.argv.(1) "saxpy" and vector_add=check Sys.argv.(2) "vector_add" in
   let literal=check Sys.argv.(3) "literal_probe" in
   let dot=check Sys.argv.(4) "dot_product" in
+  if not (List.exists (function Ir.Global_idx_x _ -> true | _ -> false) vector_add.body) ||
+     not (List.exists (function Ir.Load_f32_masked _ -> true | _ -> false) vector_add.body) ||
+     not (List.exists (function Ir.Store_f32_masked _ -> true | _ -> false) vector_add.body) then
+    failwith "global indexing or masked memory operations did not reach GPU IR";
   let input=(List.nth saxpy.args 0).value and output=(List.nth saxpy.args 1).value in
   if input.ty <> Gpu_type.MemRef ([Gpu_type.Dynamic], Gpu_type.Float32, Gpu_type.Global) ||
      output.ty <> Gpu_type.MemRef ([Gpu_type.Dynamic], Gpu_type.Float32, Gpu_type.Global) then
@@ -32,13 +36,13 @@ let () =
   if not (List.exists (function Ir.Const_f32 (_, 2.5) -> true | _ -> false) literal.body) then
     failwith "Typedtree float literal did not reach GPU IR";
   if not (List.exists (function Ir.Warp_reduce_sum_f32 _ -> true | _ -> false) dot.body) ||
-     not (List.exists (function Ir.Store_f32_lane0 _ -> true | _ -> false) dot.body) then
+     not (List.exists (function Ir.Store_f32_grid_leader _ -> true | _ -> false) dot.body) then
     failwith "OxCaml dot-product reduction did not reach verified GPU IR";
   if Gpu_type.string_of_ty (Gpu_type.Tensor ([Gpu_type.Static 128], Gpu_type.Float32)) <>
      "tensor<[128],f32>" then failwith "Tensor type shape/dtype printing changed";
-  if Gpu_type.parent_level Gpu_type.Lane <> Some Gpu_type.Warp ||
-     Gpu_type.parent_level Gpu_type.Warp <> Some Gpu_type.Warpgroup ||
-     Gpu_type.parent_level Gpu_type.Warpgroup <> Some Gpu_type.Cta ||
-     Gpu_type.parent_level Gpu_type.Cta <> Some Gpu_type.Grid then
+  if Execution.parent Execution.Lane <> Some Execution.Warp ||
+     Execution.parent Execution.Warp <> Some Execution.Warpgroup ||
+     Execution.parent Execution.Warpgroup <> Some Execution.Cta ||
+     Execution.parent Execution.Cta <> Some Execution.Grid then
     failwith "GPU execution hierarchy is malformed";
   print_endline "OxCaml Typedtree bodies, modes, and literals lowered into verified GPU IR"

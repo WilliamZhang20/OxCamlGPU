@@ -25,10 +25,13 @@ let serialize_arrow_mode mode =
 (* Keep the exporter independent of OxCamlGPU's runtime modules. *)
 type kernel_expr =
   | Arg of int
+  | Local of int
   | Thread_idx_x
+  | Global_idx_x
   | I32_const of int
   | F32_const of string
   | Load_f32 of int * kernel_expr
+  | Load_f32_masked of int * kernel_expr * kernel_expr
   | Add_f32 of kernel_expr * kernel_expr
   | Mul_f32 of kernel_expr * kernel_expr
   | Warp_sum_f32 of kernel_expr
@@ -36,10 +39,13 @@ type binding = Buffer of int | Value of kernel_expr
 
 let rec emit_expr = function
   | Arg i -> "arg " ^ string_of_int i
+  | Local i -> "local " ^ string_of_int i
   | Thread_idx_x -> "thread_idx_x"
+  | Global_idx_x -> "global_idx_x"
   | I32_const n -> "i32 " ^ string_of_int n
   | F32_const n -> "f32 " ^ n
   | Load_f32 (i, ix) -> "load " ^ string_of_int i ^ " " ^ emit_expr ix
+  | Load_f32_masked (i, ix, n) -> "load_masked " ^ string_of_int i ^ " " ^ emit_expr ix ^ " " ^ emit_expr n
   | Add_f32 (a,b) -> "add " ^ emit_expr a ^ " " ^ emit_expr b
   | Mul_f32 (a,b) -> "mul " ^ emit_expr a ^ " " ^ emit_expr b
   | Warp_sum_f32 value -> "warp_sum " ^ emit_expr value
@@ -50,10 +56,13 @@ let primitive_name path =
     if String.ends_with ~suffix full_name then Some name else None in
   match List.find_map Fun.id
     [ primitive "Gpu_dsl.Gpu.thread_idx_x" "thread_idx_x";
+      primitive "Gpu_dsl.Gpu.global_idx_x" "global_idx_x";
       primitive "Gpu_dsl.Gpu.load" "load";
+      primitive "Gpu_dsl.Gpu.load_masked" "load_masked";
       primitive "Gpu_dsl.Gpu.store" "store";
+      primitive "Gpu_dsl.Gpu.store_masked" "store_masked";
       primitive "Gpu_dsl.Gpu.warp_sum_f32" "warp_sum_f32";
-      primitive "Gpu_dsl.Gpu.store_lane0" "store_lane0";
+      primitive "Gpu_dsl.Gpu.store_grid_leader" "store_grid_leader";
       primitive ".+." "+.";
       primitive ".*." "*." ] with
   | Some name -> name
@@ -82,24 +91,39 @@ let rec expression env exp = match exp.exp_desc with
       let args = args_of_apply args in
       (match name, args with
        | "thread_idx_x", [_] -> Thread_idx_x
+       | "global_idx_x", [_] -> Global_idx_x
        | "load", [buffer; index] ->
            let index = expression env index in
            (match buffer.exp_desc with
             | Texp_ident { path=Path.Pident id; _ } ->
                 (match identifier env (Path.Pident id) with Buffer i -> Load_f32 (i,index) | _ -> fail "load expects a buffer")
             | _ -> fail "load expects a buffer parameter")
+       | "load_masked", [buffer; index; bound] ->
+           let index = expression env index in
+           let bound = expression env bound in
+           (match buffer.exp_desc with
+            | Texp_ident { path=Path.Pident id; _ } ->
+                (match identifier env (Path.Pident id) with Buffer i -> Load_f32_masked(i,index,bound) | _ -> fail "masked load expects a buffer")
+            | _ -> fail "masked load expects a buffer parameter")
        | "+.", [a;b] -> Add_f32 (expression env a, expression env b)
        | "*.", [a;b] -> Mul_f32 (expression env a, expression env b)
        | "warp_sum_f32", [value] -> Warp_sum_f32 (expression env value)
        | _ -> fail ("unsupported scalar expression " ^ name))
   | _ -> fail "unsupported expression in GPU kernel"
 
-let rec statement env exp = match exp.exp_desc with
-  | Texp_open (_, body) -> statement env body
+let rec statement next_local env exp = match exp.exp_desc with
+  | Texp_open (_, body) -> statement next_local env body
+  | Texp_sequence (first, _, second) ->
+      statement next_local env first;
+      statement next_local env second
   | Texp_let (Nonrecursive, [binding], body) ->
       let value = expression env binding.vb_expr in
       (match binding.vb_pat.pat_desc with
-       | Tpat_var {id; _} -> statement ((id, Value value)::env) body
+       | Tpat_var {id; _} ->
+           let local_id = !next_local in
+           incr next_local;
+           Printf.printf "body\tlet\t%d\t%s\n" local_id (emit_expr value);
+           statement next_local ((id, Value (Local local_id))::env) body
        | _ -> fail "kernel let binding must bind one name")
   | Texp_apply (callee, args, _, _, _, _) ->
       let name = match callee.exp_desc with
@@ -114,12 +138,22 @@ let rec statement env exp = match exp.exp_desc with
              | _ -> fail "store expects a buffer parameter" in
            let index = expression env index and value = expression env value in
            Printf.printf "body\tstore\t%d\t%s\t%s\n" buffer (emit_expr index) (emit_expr value)
-       | "store_lane0", [buffer; value] ->
+       | "store_grid_leader", [buffer; value] ->
            let buffer = match buffer.exp_desc with
              | Texp_ident { path=Path.Pident id; _ } ->
-                 (match identifier env (Path.Pident id) with Buffer i -> i | _ -> fail "store_lane0 expects a buffer")
-             | _ -> fail "store_lane0 expects a buffer parameter" in
-           Printf.printf "body\tstore_lane0\t%d\t%s\n" buffer (emit_expr (expression env value))
+                 (match identifier env (Path.Pident id) with Buffer i -> i | _ -> fail "store_grid_leader expects a buffer")
+             | _ -> fail "store_grid_leader expects a buffer parameter" in
+           Printf.printf "body\tstore_grid_leader\t%d\t%s\n" buffer (emit_expr (expression env value))
+       | "store_masked", [buffer; index; bound; value] ->
+           let buffer = match buffer.exp_desc with
+             | Texp_ident { path=Path.Pident id; _ } ->
+                 (match identifier env (Path.Pident id) with Buffer i -> i | _ -> fail "masked store expects a buffer")
+             | _ -> fail "masked store expects a buffer parameter" in
+           let index = expression env index in
+           let bound = expression env bound in
+           let value = expression env value in
+           Printf.printf "body\tstore_masked\t%d\t%s\t%s\t%s\n" buffer
+             (emit_expr index) (emit_expr bound) (emit_expr value)
        | _ -> fail ("unsupported GPU statement " ^ name))
   | _ -> fail "kernel body must end in a store"
 
@@ -177,8 +211,9 @@ let compile_kernel target structure =
         match ty with
         | "Gpu_dsl.gpu_array" -> (param.fp_param, Buffer index)
         | "float" -> (param.fp_param, Value (Arg index))
+        | "int" -> (param.fp_param, Value (Arg index))
         | _ -> fail ("unsupported kernel parameter type " ^ ty)) params in
-      statement env body
+      statement (ref 0) env body
   | _ -> fail "kernel must be a simple function with a body"
 
 let () =

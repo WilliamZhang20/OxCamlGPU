@@ -1,4 +1,5 @@
 open Gpu_type
+open Execution
 open Mode
 open Ir
 
@@ -7,12 +8,23 @@ let expect_error code = function
   | Error es when List.exists (fun e -> e.Verifier.code = code) es -> ()
   | Error es -> failwith ("expected " ^ code ^ ", got " ^ String.concat "," (List.map (fun e -> e.Verifier.code) es))
   | Ok () -> failwith ("expected error " ^ code)
-let actual ?(ownership=Aliased) ?(permission=Read_only) buffer_id =
-  { buffer_id; actual_ownership=ownership; actual_permission=permission }
+let actual ?(ownership=Aliased) ?(permission=Read_only) ?(locality=Global)
+    ?(domain_portability=Domain_portability_unspecified)
+    ?(gpu_boundary=Boundary_unspecified) buffer_id =
+  { buffer_id; actual_ownership=ownership; actual_permission=permission;
+    actual_locality=locality; actual_domain_portability=domain_portability;
+    actual_gpu_boundary=gpu_boundary }
 let contains text needle =
   let n=String.length needle in
   let rec loop i = i + n <= String.length text &&
     (String.sub text i n = needle || loop (i+1)) in loop 0
+let count text needle =
+  let n=String.length needle in
+  let rec loop i count =
+    if i + n > String.length text then count
+    else if String.sub text i n = needle then loop (i+n) (count+1)
+    else loop (i+1) count in
+  loop 0 0
 
 let () =
   let x=make_value ~locality:Global ~permission:Read_only 0 (Ptr(F32,Gpu_type.Global))
@@ -22,12 +34,43 @@ let () =
   expect_ok (Verifier.check_call kernel [actual 10;actual ~ownership:Unique ~permission:Read_write 11]);
   expect_error "E_UNIQUE_ALIAS" (Verifier.check_call kernel [actual 10;actual ~ownership:Unique ~permission:Read_write 10]);
   expect_error "E_UNIQUE_REQUIRED" (Verifier.check_call kernel [actual 10;actual ~permission:Read_write 11]);
+  let modal_arg=make_value ~locality:Global ~domain_portability:Domain_portable
+      ~gpu_boundary:Boundary_portable 105 (Ptr(F32,Gpu_type.Global)) in
+  let modal_kernel={name="modal_call";args=[{name="p";value=modal_arg}];body=[]} in
+  expect_error "E_LOCALITY_REQUIRED"
+    (Verifier.check_call modal_kernel [actual ~locality:Local 105]);
+  expect_error "E_DOMAIN_PORTABILITY_REQUIRED"
+    (Verifier.check_call modal_kernel [actual ~domain_portability:Domain_nonportable 105]);
+  expect_error "E_DOMAIN_PORTABILITY_REQUIRED"
+    (Verifier.check_call modal_kernel [actual 105]);
+  expect_error "E_GPU_BOUNDARY_REQUIRED"
+    (Verifier.check_call modal_kernel [actual ~gpu_boundary:Boundary_local 105]);
+  expect_error "E_GPU_BOUNDARY_REQUIRED"
+    (Verifier.check_call modal_kernel [actual 105]);
+  expect_ok (Verifier.check_call modal_kernel [actual ~domain_portability:Domain_portable
+      ~gpu_boundary:Boundary_portable 105]);
   let local = make_value ~locality:Local 40 (Ptr(F32,Gpu_type.Global)) in
   let returning = { kernel with name="bad_escape"; body=[Return(Some local)] } in
   expect_error "E_LOCAL_ESCAPE" (Verifier.verify_kernel returning);
   let ro=make_value ~permission:Read_only 50 (Ptr(F32,Gpu_type.Global)) and v=make_value 51 F32 in
   let readonly_store={name="bad_store";args=[{name="p";value=ro}];body=[Const_f32(v,1.);Store_f32(ro,v)]} in
   expect_error "E_READONLY_STORE" (Verifier.verify_kernel readonly_store);
+  let wrong_load_result=make_value 97 I32 and one=make_value 98 I32 and sum_i=make_value 99 I32 in
+  let load_result_mismatch={name="load_result_mismatch";args=[{name="p";value=ro}];body=[
+      Load_f32(wrong_load_result,ro);Const_i32(one,1);Add_i32(sum_i,wrong_load_result,one)]} in
+  expect_error "E_LOAD_TYPE" (Verifier.verify_kernel load_result_mismatch);
+  let wrong_const=make_value 100 F32 in
+  expect_error "E_CONST_TYPE" (Verifier.verify_kernel
+    {name="wrong_const_result";args=[];body=[Const_i32(wrong_const,1)]});
+  let mask_index=make_value 52 I32 and wrong_index=make_value 53 I32
+  and mask_bound=make_value 54 I32 in
+  let masked_ptr=make_value ~permission:Read_only 55 (Ptr(F32,Gpu_type.Global))
+  and masked_value=make_value 56 F32 in
+  let bad_mask={name="bad_mask_index";args=[{name="p";value=ro}];body=[
+      Const_i32(mask_index,0);Const_i32(wrong_index,1);Const_i32(mask_bound,2);
+      Gep_f32(masked_ptr,ro,mask_index);
+      Load_f32_masked(masked_value,masked_ptr,wrong_index,mask_bound)]} in
+  expect_error "E_MASK_INDEX" (Verifier.verify_kernel bad_mask);
   let forged = { ro with permission=Read_write } in
   let forged_store={readonly_store with body=[Const_f32(v,1.);Store_f32(forged,v)]} in
   expect_error "E_VALUE_IDENTITY" (Verifier.verify_kernel forged_store);
@@ -72,6 +115,17 @@ let () =
   let scale_ptx=Ptx.emit scale_kernel in
   if not (contains scale_ptx "mul.f32 %f65, %f64, %f66;") then
     failwith "tile scaling PTX did not emit f32 multiplication";
+  let int_shared=make_value ~permission:Read_write ~layout:smem_layout 101
+      (MemRef(shape,Int32,Gpu_type.Shared))
+  and int_tensor=make_value ~locality:Local ~layout:reg_layout 102
+      (Tensor(shape,Int32))
+  and scaled_int=make_value ~locality:Local ~layout:reg_layout 103
+      (Tensor(shape,Int32))
+  and int_factor=make_value 104 F32 in
+  let bad_int_scale={name="bad_int_scale";args=[];body=[Shared_alloc int_shared;
+      Load_tensor(int_tensor,int_shared);Const_f32(int_factor,2.);
+      Scale_tensor_f32(scaled_int,int_tensor,int_factor)]} in
+  expect_error "E_TILE_ARITH_TYPE" (Verifier.verify_kernel bad_int_scale);
   let missing_barrier={movement with body=List.filter (function Barrier _ -> false | _ -> true) movement.body} in
   expect_error "E_SHARED_SYNC" (Verifier.verify_kernel missing_barrier);
   let bad_layout=Layout.Register {
@@ -86,4 +140,38 @@ let () =
     failwith ("shared movement PTX missing " ^ part))
     [".shared .align 16 .b8 __shared_62[128];";
      "ld.global.f32";"st.shared.f32";"bar.sync 0;";"ld.shared.f32";"st.global.f32"];
+  let x=make_value ~locality:Global ~permission:Read_only 90 (MemRef(shape,Float32,Gpu_type.Global))
+  and y=make_value ~locality:Global ~permission:Read_only 91 (MemRef(shape,Float32,Gpu_type.Global))
+  and result=make_value ~ownership:Unique ~locality:Global ~permission:Write_only 92
+      (MemRef([Static 1],Float32,Gpu_type.Global)) in
+  let tx=make_value ~locality:Local ~layout:reg_layout 93 (Tensor(shape,Float32))
+  and ty=make_value ~locality:Local ~layout:reg_layout 94 (Tensor(shape,Float32))
+  and products=make_value ~locality:Local ~layout:reg_layout 95 (Tensor(shape,Float32))
+  and sum=make_value 96 F32 in
+  let high_level_dot={name="dot_ir";args=[{name="x";value=x};{name="y";value=y};{name="result";value=result}];body=[
+      Load_tensor(tx,x);Load_tensor(ty,y);Mul_tensor_f32(products,tx,ty);
+      Reduce_sum_f32(sum,products);Store_f32_grid_leader(result,sum)]} in
+  expect_ok (Verifier.verify_kernel high_level_dot);
+  let dot_ptx=Ptx.emit high_level_dot in
+  List.iter (fun part -> if not (contains dot_ptx part) then
+    failwith ("lowered dot PTX missing " ^ part))
+    [".reqntid 32, 1, 1";"ld.global.f32";"mul.f32";"shfl.sync.bfly.b32";"st.global.f32"];
+  let alias_sensitive_kernel y_ownership =
+    let source=make_value ~provenance:(Some 110) ~permission:Read_only 110
+        (Ptr(F32,Gpu_type.Global))
+    and destination=make_value ~ownership:y_ownership ~provenance:(Some 111)
+        ~permission:Read_write 111 (Ptr(F32,Gpu_type.Global))
+    and loaded=make_value 112 F32 and replacement=make_value 113 F32
+    and reloaded=make_value 114 F32 in
+    {name="alias_sensitive_load";
+     args=[{name="x";value=source};{name="y";value=destination}];
+     body=[Load_f32(loaded,source);Const_f32(replacement,0.);
+       Store_f32(destination,replacement);Load_f32(reloaded,source);
+       Store_f32(destination,reloaded)]} in
+  let aliased_ptx=Compiler.compile_ptx (alias_sensitive_kernel Aliased)
+  and unique_ptx=Compiler.compile_ptx (alias_sensitive_kernel Unique) in
+  if count aliased_ptx "ld.global.f32" <> 2 then
+    failwith "aliased store incorrectly preserved a cached global load";
+  if count unique_ptx "ld.global.f32" <> 1 then
+    failwith "unique noalias fact did not eliminate the redundant global load";
   print_endline "verifier semantic tests passed"

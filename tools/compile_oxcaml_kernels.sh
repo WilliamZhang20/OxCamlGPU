@@ -49,6 +49,11 @@ for kernel in saxpy vector_add dot_product; do
   "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/unique_reuse.cmo" test/fixtures/unique_reuse.ml
+"$tmp/export_typedtree_modes" "$tmp/unique_reuse.cmt" unique_reuse > "$out/unique_reuse.gpu"
+"$tmp/export_typedtree_modes" "$tmp/unique_reuse.cmt" alias_reuse_aliased > "$out/alias_reuse_aliased.gpu"
+
 # A small fixture keeps non-kernel examples from carrying adapter-only syntax
 # just to exercise literal lowering.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \

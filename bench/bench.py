@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch-latency comparison for today's fixed four-lane kernels."""
+"""Launch-latency comparison for the OxGPU kernels and PyTorch references."""
 import argparse
 import ctypes
 import ctypes.util
@@ -45,10 +45,10 @@ def load_kernel(cuda, cubin, name):
     return module, function
 
 
-def launch(cuda, function, arguments, threads=4, stream=0):
+def launch(cuda, function, arguments, threads=128, blocks=1, stream=0):
     values = [ctypes.c_uint64(int(arg)) if isinstance(arg, int) else arg for arg in arguments]
     params = (ctypes.c_void_p * len(values))(*(ctypes.cast(ctypes.byref(v), ctypes.c_void_p) for v in values))
-    checked(cuda.cuLaunchKernel(function, 1, 1, 1, threads, 1, 1, 0,
+    checked(cuda.cuLaunchKernel(function, blocks, 1, 1, threads, 1, 1, 0,
                                 ctypes.c_void_p(stream), params, None), "cuLaunchKernel")
 
 
@@ -81,8 +81,9 @@ def main():
     torch.cuda.init()
     cuda = driver_api(torch.cuda.current_device())
     stream = torch.cuda.current_stream().cuda_stream
-    vx, vy, vz = [torch.arange(4, device="cuda", dtype=torch.float32) for _ in range(3)]
-    sx, sy = [torch.ones(4, device="cuda", dtype=torch.float32) for _ in range(2)]
+    n_elements = 1003
+    vx, vy, vz = [torch.arange(n_elements, device="cuda", dtype=torch.float32) for _ in range(3)]
+    sx, sy = [torch.ones(n_elements, device="cuda", dtype=torch.float32) for _ in range(2)]
     dx = torch.arange(1, 33, device="cuda", dtype=torch.float32) * 0.25
     dy = torch.arange(32, device="cuda", dtype=torch.float32) * 0.5 - 3.5
     dot_out = torch.zeros((), device="cuda", dtype=torch.float32)
@@ -90,15 +91,19 @@ def main():
     saxpy_module, saxpy = load_kernel(cuda, args.saxpy_cubin, "saxpy")
     dot_module, dot = load_kernel(cuda, args.dot_product_cubin, "dot_product")
     alpha = ctypes.c_float(1e-6)
+    n = ctypes.c_uint32(n_elements)
     saxpy_arguments = (ctypes.c_uint64(sx.data_ptr()), ctypes.c_uint64(sy.data_ptr()), alpha)
-    vector_arguments = (ctypes.c_uint64(vx.data_ptr()), ctypes.c_uint64(vy.data_ptr()), ctypes.c_uint64(vz.data_ptr()))
+    saxpy_arguments += (n,)
+    vector_arguments = (ctypes.c_uint64(vx.data_ptr()), ctypes.c_uint64(vy.data_ptr()), ctypes.c_uint64(vz.data_ptr()), n)
 
-    launch(cuda, vector, vector_arguments, stream=stream)
+    vector_threads = 128
+    vector_blocks = (n_elements + vector_threads - 1) // vector_threads
+    launch(cuda, vector, vector_arguments, threads=vector_threads, blocks=vector_blocks, stream=stream)
     torch.cuda.synchronize()
     if not torch.allclose(vz, vx + vy):
         raise RuntimeError("OxGPU vector_add result did not match PyTorch")
 
-    launch(cuda, saxpy, saxpy_arguments, stream=stream)
+    launch(cuda, saxpy, saxpy_arguments, threads=vector_threads, blocks=vector_blocks, stream=stream)
     torch.cuda.synchronize()
     expected_saxpy = torch.ones_like(sy) + sx * 1e-6
     if not torch.allclose(sy, expected_saxpy):
@@ -111,18 +116,18 @@ def main():
         raise RuntimeError("OxGPU dot_product result did not match torch.dot")
 
     vector_results = {
-        "OxGPU vector_add": timed_ms(lambda: launch(cuda, vector, vector_arguments, stream=stream), args.warmup, args.iterations),
+        "OxGPU vector_add": timed_ms(lambda: launch(cuda, vector, vector_arguments, threads=vector_threads, blocks=vector_blocks, stream=stream), args.warmup, args.iterations),
         "PyTorch add(out=)": timed_ms(lambda: torch.add(vx, vy, out=vz), args.warmup, args.iterations),
     }
     saxpy_results = {
-        "OxGPU saxpy": timed_ms(lambda: launch(cuda, saxpy, saxpy_arguments, stream=stream), args.warmup, args.iterations),
+        "OxGPU saxpy": timed_ms(lambda: launch(cuda, saxpy, saxpy_arguments, threads=vector_threads, blocks=vector_blocks, stream=stream), args.warmup, args.iterations),
         "PyTorch add_(alpha=)": timed_ms(lambda: torch.add(sy, sx, alpha=1e-6, out=sy), args.warmup, args.iterations),
     }
     dot_results = {
         "OxGPU dot_product": timed_ms(lambda: launch(cuda, dot, dot_arguments, threads=32, stream=stream), args.warmup, args.iterations),
         "PyTorch torch.dot (cuBLAS)": timed_ms(lambda: torch.dot(dx, dy, out=dot_out), args.warmup, args.iterations),
     }
-    print("Median CUDA-event time per launch (microseconds):")
+    print("Median CUDA-event time per launch (microseconds; vector kernels N=1003, dot N=32):")
     for section, rows in (("vector_add", vector_results), ("saxpy", saxpy_results)):
         print(f"\n{section}")
         for name, micros in rows.items():

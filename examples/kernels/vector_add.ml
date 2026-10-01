@@ -4,6 +4,7 @@ let vector_add :
   float gpu_array @ aliased read ->
   float gpu_array @ aliased read ->
   float gpu_array @ unique read_write ->
-  unit = fun x y z ->
-  let i = Gpu.thread_idx_x () in
-  Gpu.store z i (Gpu.load x i +. Gpu.load y i)
+  int ->
+  unit = fun x y z n ->
+  let i = Gpu.global_idx_x () in
+  Gpu.store_masked z i n (Gpu.load_masked x i n +. Gpu.load_masked y i n)
