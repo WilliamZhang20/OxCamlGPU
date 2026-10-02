@@ -1,3 +1,4 @@
 let compile_ptx kernel =
   let kernel = Optimizer.optimize kernel in
-  Ptx.emit kernel
+  let target = Ptx_lowering.lower kernel in
+  Ptx.emit_target target

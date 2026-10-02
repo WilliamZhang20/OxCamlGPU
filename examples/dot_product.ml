@@ -5,6 +5,5 @@ let read_file path =
 let () =
   if Array.length Sys.argv <> 2 then failwith "usage: dot_product.exe DOT_PRODUCT.gpu";
   let metadata = read_file Sys.argv.(1) in
-  let signature = Oxcaml_frontend.parse_typedtree_metadata metadata in
-  let source = Kernel_ast.of_compiler_metadata metadata in
-  print_string (Compiler.compile_ptx (Kernel_frontend.lower source signature))
+  let source = Oxcaml_frontend.import metadata in
+  print_string (Compiler.compile_ptx (Kernel_frontend.lower source))

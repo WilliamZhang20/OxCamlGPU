@@ -5,6 +5,7 @@ type dim = Static of int | Symbol of string | Dynamic
 type shape = dim list
 
 type ty =
+  | Bool
   | I32
   | F32
   | Unit
@@ -23,6 +24,7 @@ let string_of_shape shape =
 let string_of_dtype = function Int32 -> "i32" | Float32 -> "f32"
 
 let rec string_of_ty = function
+  | Bool -> "bool"
   | I32 -> "i32"
   | F32 -> "f32"
   | Unit -> "unit"
@@ -42,3 +44,7 @@ let is_global_f32_memref = function
 let is_global_f32_buffer = function
   | Ptr (F32, Global) | MemRef (_, Float32, Global) -> true
   | _ -> false
+
+type comparison = Eq | Ne | Lt | Le | Gt | Ge
+
+let string_of_comparison = function Eq->"eq" | Ne->"ne" | Lt->"lt" | Le->"le" | Gt->"gt" | Ge->"ge"

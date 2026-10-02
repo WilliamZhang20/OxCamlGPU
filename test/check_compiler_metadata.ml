@@ -5,17 +5,16 @@ let read_file path =
 
 let () =
   if Array.length Sys.argv <> 5 then failwith "usage: check_compiler_metadata SAXPY_METADATA VECTOR_ADD_METADATA LITERAL_METADATA DOT_METADATA";
-  let malformed = "format\t2\nkernel\tbad\narg\t0\tbuffer_f32\tunique\taliased\tnonportable\tread_write\nresult\tunit\taliased\tglobal\tnonportable\tread_write\n" in
+  let malformed = "format\t3\nkernel\tbad\narg\t0\tbuffer_f32\tunique\taliased\tnonportable\tread_write\nresult\tunit\taliased\tglobal\tnonportable\tread_write\n" in
   (match Gpu_metadata.parse malformed with
    | _ -> failwith "conflicting modes should be rejected by shared metadata parser"
    | exception Gpu_metadata.Parse_error _ -> ());
   let check path name =
     let metadata=read_file path in
-    let signature=Oxcaml_frontend.parse_typedtree_metadata metadata in
-    let source=Kernel_ast.of_compiler_metadata metadata in
-    let kernel=Kernel_frontend.lower source signature in
+    let source=Oxcaml_frontend.import metadata in
+    let kernel=Kernel_frontend.lower source in
     Verifier.verify_exn kernel;
-    if signature.name <> name || source.name <> name then failwith "kernel name changed during Typedtree import";
+    if source.name <> name then failwith "kernel name changed during Typedtree import";
     kernel in
   let saxpy=check Sys.argv.(1) "saxpy" and vector_add=check Sys.argv.(2) "vector_add" in
   let literal=check Sys.argv.(3) "literal_probe" in
@@ -28,10 +27,10 @@ let () =
   if input.ty <> Gpu_type.MemRef ([Gpu_type.Dynamic], Gpu_type.Float32, Gpu_type.Global) ||
      output.ty <> Gpu_type.MemRef ([Gpu_type.Dynamic], Gpu_type.Float32, Gpu_type.Global) then
     failwith "GPU arrays were not represented as dynamic global f32 MemRefs";
-  if input.ownership<>Mode.Aliased || input.permission<>Mode.Read_only ||
-     output.ownership<>Mode.Unique || output.permission<>Mode.Read_write then
+  if input.ownership<>Gpu_mode.Aliased || input.permission<>Gpu_mode.Read_only ||
+     output.ownership<>Gpu_mode.Unique || output.permission<>Gpu_mode.Read_write then
     failwith "OxCaml typedtree modes did not reach GPU IR";
-  if (List.nth vector_add.args 2).value.ownership<>Mode.Unique then
+  if (List.nth vector_add.args 2).value.ownership<>Gpu_mode.Unique then
     failwith "OxCaml vector_add uniqueness did not reach GPU IR";
   if not (List.exists (function Ir.Const_f32 (_, 2.5) -> true | _ -> false) literal.body) then
     failwith "Typedtree float literal did not reach GPU IR";

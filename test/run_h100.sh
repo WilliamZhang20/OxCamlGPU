@@ -19,5 +19,11 @@ ptxas -arch=sm_90 /tmp/oxgpu-saxpy.ptx -o /tmp/oxgpu-saxpy.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-dot-product.ptx -o /tmp/oxgpu-dot-product.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-unique-reuse.ptx -o /tmp/oxgpu-unique-reuse.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-alias-reuse-aliased.ptx -o /tmp/oxgpu-alias-reuse-aliased.cubin
+for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch joined_reduction rounding; do
+  dune exec test/emit_ptx.exe -- "$metadata_dir/$kernel.gpu" > "$metadata_dir/$kernel.ptx"
+  ptxas -arch=sm_90 "$metadata_dir/$kernel.ptx" -o "$metadata_dir/$kernel.cubin"
+done
+dune exec test/test_control_flow.exe -- --ptx > "$metadata_dir/branch_ir.ptx"
+ptxas -arch=sm_90 "$metadata_dir/branch_ir.ptx" -o "$metadata_dir/branch_ir.cubin"
 nvcc -O2 test/run_h100.cu -lcuda -o /tmp/oxgpu-run-h100
-/tmp/oxgpu-run-h100 /tmp/oxgpu-vector-add.cubin /tmp/oxgpu-saxpy.cubin /tmp/oxgpu-dot-product.cubin /tmp/oxgpu-unique-reuse.cubin /tmp/oxgpu-alias-reuse-aliased.cubin
+/tmp/oxgpu-run-h100 /tmp/oxgpu-vector-add.cubin /tmp/oxgpu-saxpy.cubin /tmp/oxgpu-dot-product.cubin /tmp/oxgpu-unique-reuse.cubin /tmp/oxgpu-alias-reuse-aliased.cubin "$metadata_dir"

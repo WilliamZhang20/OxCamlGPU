@@ -1,10 +1,25 @@
-(* Kernel_ast is the frontend-facing name for the versioned interchange AST.
-   The rows are parsed once by Gpu_metadata and remain typed from here on. *)
-type scalar = Gpu_metadata.scalar = I32 | F32
-type arg_kind = Gpu_metadata.arg_kind = Buffer of scalar | Scalar of scalar
-type atom = Gpu_metadata.atom = Arg of int | Value of int
-type memory = Gpu_metadata.memory = Buffer_arg of int | Pointer of atom
-type operation = Gpu_metadata.operation =
+open Gpu_type
+open Gpu_mode
+
+type slot = {
+  loc : Source_span.t;
+  ty : ty;
+  ownership : ownership;
+  locality : locality;
+  domain_portability : domain_portability;
+  gpu_boundary : gpu_boundary;
+  permission : permission;
+}
+type argument = { index : int; slot : slot }
+type atom = Arg of int | Value of int
+type memory = Buffer_arg of int | Pointer of atom
+type operation =
+  | Const_bool of int * bool
+  | Add_i32 of int * atom * atom
+  | Sub_i32 of int * atom * atom
+  | Mul_i32 of int * atom * atom
+  | Compare of int * comparison * atom * atom
+  | If of (int * ty) option * atom * region * region
   | Const_i32 of int * int
   | Const_f32 of int * float
   | Thread_idx_x of int
@@ -18,17 +33,8 @@ type operation = Gpu_metadata.operation =
   | Store_f32 of atom * atom
   | Store_f32_masked of atom * atom * atom * atom
   | Store_grid_leader_f32 of memory * atom
+and instruction = { op : operation; loc : Source_span.t }
+and region = { body : instruction list; yield : atom option }
+type t = { name : string; args : argument list; result : slot; body : instruction list }
 
-type t = { name : string; args : arg_kind list; body : operation list }
-exception Parse_error of string
-
-let of_compiler_metadata source =
-  let metadata = try Gpu_metadata.parse source with
-    | Gpu_metadata.Parse_error message -> raise (Parse_error message) in
-  let args = List.map (fun (arg : Gpu_metadata.argument) ->
-    match arg.slot.ty with
-    | Gpu_type.MemRef (_, Gpu_type.Float32, _) -> Buffer F32
-    | Gpu_type.F32 -> Scalar F32
-    | Gpu_type.I32 -> Scalar I32
-    | _ -> raise (Parse_error "unsupported typedtree argument type")) metadata.args in
-  { name=metadata.name; args; body=metadata.body }
+let instruction ?(loc=Source_span.synthetic) op = {op;loc}

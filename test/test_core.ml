@@ -1,6 +1,6 @@
 open Gpu_type
 open Execution
-open Mode
+open Gpu_mode
 open Ir
 
 let expect_ok = function Ok () -> () | Error es -> failwith (String.concat "; " (List.map (fun e -> e.Verifier.code ^ ": " ^ e.message) es))
@@ -49,15 +49,11 @@ let () =
     (Verifier.check_call modal_kernel [actual 105]);
   expect_ok (Verifier.check_call modal_kernel [actual ~domain_portability:Domain_portable
       ~gpu_boundary:Boundary_portable 105]);
-  let nonunit_signature : Oxcaml_frontend.signature = {
-    name="nonunit"; args=[];
-    result={ty=F32; ownership=Aliased; locality=Global;
-      domain_portability=Domain_nonportable; gpu_boundary=Boundary_unspecified;
-      permission=Read_only} } in
-  (try
-     ignore (Kernel_frontend.lower {Kernel_ast.name="nonunit";args=[];body=[]} nonunit_signature);
-     failwith "non-unit GPU kernel result unexpectedly lowered"
-   with Invalid_argument message when message = "GPU kernel entry points must return unit" -> ());
+  let nonunit : Kernel_ast.t = {name="nonunit";args=[];body=[];
+    result={loc=Source_span.synthetic;ty=F32;ownership=Aliased;locality=Global;
+      domain_portability=Domain_nonportable;gpu_boundary=Boundary_unspecified;permission=Read_only}} in
+  (try ignore(Kernel_frontend.lower nonunit);failwith "nonunit kernel accepted"
+   with Invalid_argument _ -> ());
   let local = make_value ~locality:Local 40 (Ptr(F32,Gpu_type.Global)) in
   let returning = { kernel with name="bad_escape"; body=[Return(Some local)] } in
   expect_error "E_KERNEL_RETURN_TYPE" (Verifier.verify_kernel returning);
@@ -135,7 +131,7 @@ let () =
     Scale_tensor_f32(scaled,from_shared,factor)]} in
   expect_ok (Verifier.verify_kernel scale_kernel);
   let scale_ptx=Ptx.emit scale_kernel in
-  if not (contains scale_ptx "mul.f32 %f65, %f64, %f66;") then
+  if not (contains scale_ptx "mul.rn.f32 %f65, %f64, %f66;") then
     failwith "tile scaling PTX did not emit f32 multiplication";
   let int_shared=make_value ~permission:Read_write ~layout:smem_layout 101
       (MemRef(shape,Int32,Gpu_type.Shared))
@@ -161,7 +157,7 @@ let () =
     args=[{name="input";value={input with layout=Some reg_layout}};{name="output";value=output}];body=[]} in
   expect_error "E_MEMREF_LAYOUT" (Verifier.verify_kernel global_with_register_layout);
   let movement_ptx=Ptx.emit movement in
-  let movement_target=Ptx.lower_to_ptx_ir movement in
+  let movement_target=Ptx_lowering.lower movement in
   if movement_target.Ptx_ir.launch.threads_per_cta <> Some (32,1,1) ||
      movement_target.Ptx_ir.launch.static_shared_bytes <> 128 then
     failwith "PTX target lowering must derive exact CTA and static shared-memory requirements";
@@ -184,7 +180,7 @@ let () =
   let dot_ptx=Ptx.emit high_level_dot in
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("lowered dot PTX missing " ^ part))
-    [".reqntid 32, 1, 1";"ld.global.f32";"mul.f32";"shfl.sync.bfly.b32";"st.global.f32"];
+    [".reqntid 32, 1, 1";"ld.global.f32";"mul.rn.f32";"shfl.sync.bfly.b32";"st.global.f32"];
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("grid-leader predicate missing " ^ part)) ["%tid.y";"%tid.z"];
   let alias_sensitive_kernel y_ownership =

@@ -71,13 +71,22 @@ done
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp tools/export_typedtree_modes.ml "$tmp/export_typedtree_modes.ml"
+cp tools/typedtree_support.ml "$tmp/typedtree_support.ml"
+shared=(gpu_type gpu_mode source_span kernel_ast gpu_metadata)
+shared_objects=()
+for name in "${shared[@]}"; do
+  cp "lib/$name.ml" "$tmp/$name.ml"
+  "$native_compiler" -I "$stdlib_dir" -I "$tmp" -c "$tmp/$name.ml"
+  shared_objects+=("$tmp/$name.cmx")
+done
 
-"$native_compiler" -I "$stdlib_dir" \
+"$native_compiler" -I "$stdlib_dir" -I "$tmp" \
   -I "$main_build/.ocamlcommon.objs/byte" -I "$main_build/.ocamlcommon.objs/native" \
   -I "$main_build/.ocamlfrontend.objs/byte" -I "$main_build/.ocamlfrontend.objs/native" \
   -I "$main_build/.oxcaml_common.objs/byte" -I "$main_build/.oxcaml_common.objs/native" \
   "$main_build/ocamlcommon.cmxa" "$main_build/ocamlfrontend.cmxa" \
-  "$main_build/oxcaml_common.cmxa" "$tmp/export_typedtree_modes.ml" \
+  "$main_build/oxcaml_common.cmxa" "${shared_objects[@]}" \
+  "$tmp/typedtree_support.ml" "$tmp/export_typedtree_modes.ml" \
   -ccopt "-L$stdlib_dir" -o "$tmp/export_typedtree_modes"
 
 # The OxCaml-only DSL API lives in lib/ alongside the compiler library. Dune's
@@ -103,3 +112,23 @@ done
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/literal_probe.cmo" test/fixtures/literal_probe.ml
 "$tmp/export_typedtree_modes" "$tmp/literal_probe.cmt" literal_probe > "$out/literal_probe.gpu"
+
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/control_flow.cmo" test/fixtures/control_flow.ml
+for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch joined_reduction divergent_reduction rounding; do
+  "$tmp/export_typedtree_modes" "$tmp/control_flow.cmt" "$kernel" > "$out/$kernel.gpu"
+done
+
+# Real Typedtree negative fixtures: reject declaration lookalikes, unsupported
+# native integer ranges, and source constructs not yet implemented.
+for fixture in reject_shadow reject_overflow reject_fake_type reject_loop reject_operator; do
+  "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+    -o "$tmp/$fixture.cmo" "test/fixtures/$fixture.ml"
+  if "$tmp/export_typedtree_modes" "$tmp/$fixture.cmt" "$fixture" > "$tmp/rejected.gpu" 2> "$tmp/rejected.err"; then
+    echo "Unexpectedly accepted $fixture" >&2; exit 1
+  fi
+  if [[ -s "$tmp/rejected.gpu" ]]; then
+    echo "Failed adapter left a partial artifact for $fixture" >&2; exit 1
+  fi
+  rg -q "$fixture.ml:[0-9]+:[0-9]+:" "$tmp/rejected.err"
+done

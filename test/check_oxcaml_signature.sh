@@ -26,17 +26,11 @@ tools/compile_oxcaml_kernels.sh "$tmpdir"
 rg -q 'local,.*unique' "$tmpdir/mode_probe.typedtree"
 rg -q 'portable' "$tmpdir/mode_probe.typedtree"
 
-rg -q $'^arg\t0\tbuffer_f32\taliased\tglobal\tnonportable\tread$' "$tmpdir/saxpy.gpu"
-rg -q $'^arg\t1\tbuffer_f32\tunique\tglobal\tnonportable\tread_write$' "$tmpdir/saxpy.gpu"
-rg -q $'^format\t2$' "$tmpdir/saxpy.gpu"
-rg -q $'^body\tglobal_idx_x\t0$' "$tmpdir/saxpy.gpu"
-rg -q $'^body\tstore_f32_masked\tval:1\tval:[0-9]+\tval:0\targ:3$' "$tmpdir/saxpy.gpu"
-rg -q $'^body\tstore_f32_masked\tval:1\tval:[0-9]+\tval:0\targ:3$' "$tmpdir/vector_add.gpu"
-rg -q $'^body\twarp_reduce_sum_f32\t6\tval:5$' "$tmpdir/dot_product.gpu"
-rg -q $'^body\tstore_grid_leader_f32\tbuf:2\tval:6$' "$tmpdir/dot_product.gpu"
-rg -q $'^arg\t1\tbuffer_f32\tunique\tglobal\tnonportable\tread_write$' "$tmpdir/unique_reuse.gpu"
-rg -q $'^arg\t1\tbuffer_f32\taliased\tglobal\tnonportable\tread_write$' "$tmpdir/alias_reuse_aliased.gpu"
-rg -q $'^body\tconst_f32\t4\t2\.5$' "$tmpdir/literal_probe.gpu"
+rg -q $'^arg\t0\tbuffer_f32\taliased\tglobal\tnonportable\tread\t' "$tmpdir/saxpy.gpu"
+rg -q $'^arg\t1\tbuffer_f32\tunique\tglobal\tnonportable\tread_write\t' "$tmpdir/saxpy.gpu"
+rg -q $'^format\t3$' "$tmpdir/saxpy.gpu"
+rg -q $'^arg\t1\tbuffer_f32\tunique\tglobal\tnonportable\tread_write\t' "$tmpdir/unique_reuse.gpu"
+rg -q $'^arg\t1\tbuffer_f32\taliased\tglobal\tnonportable\tread_write\t' "$tmpdir/alias_reuse_aliased.gpu"
 dune exec test/check_compiler_metadata.exe -- "$tmpdir/saxpy.gpu" "$tmpdir/vector_add.gpu" "$tmpdir/literal_probe.gpu" "$tmpdir/dot_product.gpu"
 unique_reuse_ptx="$tmpdir/unique_reuse.ptx"
 dune exec test/emit_ptx.exe -- "$tmpdir/unique_reuse.gpu" > "$unique_reuse_ptx"
@@ -51,3 +45,18 @@ if [[ $(rg -c 'ld\.global\.f32' "$aliased_reuse_ptx") != 2 ]]; then
   exit 1
 fi
 echo "OxCaml Typedtree modes, bodies, literals, and reduction reached verified GPU IR"
+for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch; do
+  dune exec test/emit_ptx.exe -- "$tmpdir/$kernel.gpu" > "$tmpdir/$kernel.ptx"
+  rg -q 'bra L' "$tmpdir/$kernel.ptx"
+done
+
+dune exec test/emit_ptx.exe -- "$tmpdir/joined_reduction.gpu" > "$tmpdir/joined_reduction.ptx"
+if dune exec test/emit_ptx.exe -- "$tmpdir/divergent_reduction.gpu" > "$tmpdir/divergent.ptx" 2> "$tmpdir/divergent.err"; then
+  echo "Divergent full-warp reduction unexpectedly accepted" >&2; exit 1
+fi
+rg -q 'E_DIVERGENT_COLLECTIVE' "$tmpdir/divergent.err"
+rg -q 'control_flow.ml:[0-9]+:[0-9]+:' "$tmpdir/divergent.err"
+
+dune exec test/emit_ptx.exe -- "$tmpdir/rounding.gpu" > "$tmpdir/rounding.ptx"
+rg -q 'mul.rn.f32' "$tmpdir/rounding.ptx"
+rg -q 'add.rn.f32' "$tmpdir/rounding.ptx"

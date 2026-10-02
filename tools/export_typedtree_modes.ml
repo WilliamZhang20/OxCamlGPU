@@ -1,221 +1,142 @@
-(* Version-matched OxCaml adapter. It reads compiler-owned Typedtree nodes and
-   writes a versioned, flat operation stream; expressions are never serialized
-   as a second textual language. *)
+(* Walk the version-specific Typedtree and construct the shared Kernel_ast. *)
 open Typedtree
-
-let fail message = prerr_endline message; exit 2
-
-let serialize_arrow_mode mode =
-  let modes = Mode.With_locality.to_const_exn mode in
-  let uniqueness = match modes.uniqueness with
-    | Mode.Uniqueness.Const.Unique -> "unique"
-    | Mode.Uniqueness.Const.Aliased -> "aliased" in
-  let locality = match modes.areality with
-    | Mode.Locality.Const.Local -> "local"
-    | Mode.Locality.Const.Global -> "global" in
-  let portability = match modes.portability with
-    | Mode.Portability.Const.Portable -> "portable"
-    | Mode.Portability.Const.Nonportable -> "nonportable"
-    | Mode.Portability.Const.Shareable | Mode.Portability.Const.Corruptible ->
-        fail "OxCaml shareable/corruptible portability is not represented by the GPU mode model" in
-  let visibility = match modes.visibility with
-    | Mode.Visibility.Const.Read_write -> "read_write"
-    | Mode.Visibility.Const.Read -> "read"
-    | Mode.Visibility.Const.Write -> "write"
-    | Mode.Visibility.Const.Immutable -> "immutable" in
-  String.concat "\t" [uniqueness; locality; portability; visibility]
-
-type atom = Argument of int | Value of int
-type memory = Buffer of int | Pointer of int
-type binding = Scalar of atom | Memory of memory
-type state = { mutable next_value : int }
-
-let fresh state = let id = state.next_value in state.next_value <- id + 1; id
-let atom = function Argument i -> "arg:" ^ string_of_int i | Value i -> "val:" ^ string_of_int i
-let memory = function Buffer i -> "buf:" ^ string_of_int i | Pointer i -> "val:" ^ string_of_int i
-let emit fields = Printf.printf "body\t%s\n" (String.concat "\t" fields)
-
-let primitive_name path =
-  let name = Path.name path in
-  let primitive suffix short = if String.ends_with ~suffix name then Some short else None in
-  match List.find_map Fun.id
-    [ primitive "Gpu_dsl.Gpu.thread_idx_x" "thread_idx_x";
-      primitive "Gpu_dsl.Gpu.global_idx_x" "global_idx_x";
-      primitive "Gpu_dsl.Gpu.load" "load";
-      primitive "Gpu_dsl.Gpu.load_masked" "load_masked";
-      primitive "Gpu_dsl.Gpu.store" "store";
-      primitive "Gpu_dsl.Gpu.store_masked" "store_masked";
-      primitive "Gpu_dsl.Gpu.warp_sum_f32" "warp_sum_f32";
-      primitive "Gpu_dsl.Gpu.store_grid_leader" "store_grid_leader";
-      primitive ".+." "+.";
-      primitive ".*." "*." ] with
-  | Some short -> short
-  | None -> fail ("unsupported call target in GPU kernel: " ^ name)
-
-let identifier env path = match path with
-  | Path.Pident id ->
-      (match List.find_opt (fun (bound, _) -> Ident.same bound id) env with
-       | Some (_, binding) -> binding
-       | None -> fail ("unbound kernel value " ^ Ident.name id))
-  | _ -> fail ("unsupported qualified value " ^ Path.name path)
-
-let args_of_apply args = List.map (function
-  | Nolabel, Typedtree.Arg (arg, _) -> arg
-  | _ -> fail "only positional, fully applied GPU operations are supported") args
-
-let rec scalar state env exp = match expression state env exp with
-  | Scalar atom -> atom
-  | Memory _ -> fail "buffer used as a scalar"
-
-and buffer env exp = match exp.exp_desc with
-  | Texp_ident { path; _ } ->
-      (match identifier env path with
-       | Memory (Buffer i) -> Buffer i
-       | Memory (Pointer i) -> Pointer i
-       | Scalar _ -> fail "scalar used as a buffer")
-  | _ -> fail "buffer operand must be a named GPU memory value"
-
-and expression state env exp = match exp.exp_desc with
-  | Texp_constant (Const_int n) ->
-      let id = fresh state in emit ["const_i32"; string_of_int id; string_of_int n]; Scalar (Value id)
-  | Texp_constant (Const_float n) ->
-      let id = fresh state in emit ["const_f32"; string_of_int id; n]; Scalar (Value id)
-  | Texp_ident { path; _ } -> identifier env path
-  | Texp_open (_, body) -> expression state env body
-  | Texp_apply (callee, args, _, _, _, _) ->
-      let name = match callee.exp_desc with
-        | Texp_ident { path; _ } -> primitive_name path
-        | _ -> fail "GPU call target must be a resolved identifier" in
-      let args = args_of_apply args in
-      (match name, args with
-       | "thread_idx_x", [_] ->
-           let id = fresh state in emit ["thread_idx_x"; string_of_int id]; Scalar (Value id)
-       | "global_idx_x", [_] ->
-           let id = fresh state in emit ["global_idx_x"; string_of_int id]; Scalar (Value id)
-       | "load", [buffer_exp; index_exp] ->
-           let base = buffer env buffer_exp in
-           let index = scalar state env index_exp in
-           let pointer = fresh state in
-           emit ["gep_f32"; string_of_int pointer; memory base; atom index];
-           let id = fresh state in emit ["load_f32"; string_of_int id; "val:" ^ string_of_int pointer];
-           Scalar (Value id)
-       | "load_masked", [buffer_exp; index_exp; bound_exp] ->
-           let base = buffer env buffer_exp in
-           let index = scalar state env index_exp in
-           let bound = scalar state env bound_exp in
-           let pointer = fresh state in
-           emit ["gep_f32"; string_of_int pointer; memory base; atom index];
-           let id = fresh state in
-           emit ["load_f32_masked"; string_of_int id; "val:" ^ string_of_int pointer; atom index; atom bound];
-           Scalar (Value id)
-       | (("+." | "*.") as op), [a; b] ->
-           let a = scalar state env a in
-           let b = scalar state env b in
-           let id = fresh state in
-           let opcode = match op with "+." -> "add_f32" | _ -> "mul_f32" in
-           emit [opcode; string_of_int id; atom a; atom b]; Scalar (Value id)
-       | "warp_sum_f32", [value] ->
-           let value = scalar state env value in
-           let id = fresh state in emit ["warp_reduce_sum_f32"; string_of_int id; atom value];
-           Scalar (Value id)
-       | _ -> fail ("unsupported scalar expression " ^ name))
-  | _ -> fail "unsupported expression in GPU kernel"
-
-let rec statement state env exp = match exp.exp_desc with
-  | Texp_open (_, body) -> statement state env body
-  | Texp_sequence (first, _, second) ->
-      statement state env first;
-      statement state env second
-  | Texp_let (Nonrecursive, [binding], body) ->
-      let value = expression state env binding.vb_expr in
+module K = Kernel_ast
+module G = Gpu_type
+module T = Typedtree_support
+open T
+type binding = Scalar of K.atom * (int64 * int64) option | Memory of K.memory | Void
+type state = { mutable next : int; mutable body : K.instruction list }
+let fresh s = let n=s.next in s.next<-n+1;n
+let emit s exp op = s.body <- K.instruction ~loc:(span exp.exp_loc) op :: s.body
+let full_range=Some(-2147483648L,2147483647L)
+let get env exp path = match path with
+  | Path.Pident id -> (match List.find_opt (fun (key,_)->Ident.same key id) env with Some(_,v)->v | None->fail exp.exp_loc "unbound GPU value")
+  | _->fail exp.exp_loc "unsupported nonlocal value"
+let scalar loc = function Scalar(a,r)->a,r | _->fail loc "expected scalar"
+let memory loc = function Memory m->m | _->fail loc "expected GPU buffer"
+let unit loc = function Void->() | _->fail loc "expected unit"
+let checked loc (lo,hi) = if lo < -2147483648L || hi > 2147483647L then fail loc "native int arithmetic may overflow the supported i32 range; use explicit Int32 arithmetic" else Some(lo,hi)
+let args loc xs = List.map (function Nolabel,Typedtree.Arg(e,_)->e | _->fail loc "only positional fully applied calls are supported") xs
+let rec expression s env exp =
+  let const op range = let d=fresh s in emit s exp (op d); Scalar(K.Value d,range) in
+  let result op = const op None in
+  match exp.exp_desc with
+  | Texp_constant(Const_int n) -> ignore(checked exp.exp_loc (Int64.of_int n,Int64.of_int n));const (fun d->K.Const_i32(d,n)) (Some(Int64.of_int n,Int64.of_int n))
+  | Texp_constant(Const_int32 n) -> const (fun d->K.Const_i32(d,Int32.to_int n)) (Some(Int64.of_int32 n,Int64.of_int32 n))
+  | Texp_constant(Const_float n) -> result(fun d->K.Const_f32(d,float_of_string n))
+  | Texp_ident {path;_}->get env exp path
+  | Texp_open(_,e)->expression s env e
+  | Texp_construct(_,c,_,[],_) ->
+      (match kind exp.exp_env exp.exp_loc exp.exp_type,c.cstr_name with
+       | Unit,"()"->Void | Boolean,"true"->result(fun d->K.Const_bool(d,true)) | Boolean,"false"->result(fun d->K.Const_bool(d,false))
+       | _->fail exp.exp_loc "unsupported constructor")
+  | Texp_let(Nonrecursive,[binding],body) ->
+      let value=expression s env binding.vb_expr in
       (match binding.vb_pat.pat_desc with
-       | Tpat_var { id; _ } -> statement state ((id, value) :: env) body
-       | _ -> fail "kernel let binding must bind one name")
-  | Texp_apply (callee, args, _, _, _, _) ->
-      let name = match callee.exp_desc with
-        | Texp_ident { path; _ } -> primitive_name path
-        | _ -> fail "GPU statement target must be a resolved identifier" in
-      let args = args_of_apply args in
-      (match name, args with
-       | "store", [buffer_exp; index_exp; value_exp] ->
-           let base = buffer env buffer_exp in
-           let index = scalar state env index_exp in
-           let pointer = fresh state in emit ["gep_f32"; string_of_int pointer; memory base; atom index];
-           let value = scalar state env value_exp in emit ["store_f32"; "val:" ^ string_of_int pointer; atom value]
-       | "store_masked", [buffer_exp; index_exp; bound_exp; value_exp] ->
-           let base = buffer env buffer_exp in
-           let index = scalar state env index_exp in
-           let bound = scalar state env bound_exp in
-           let pointer = fresh state in emit ["gep_f32"; string_of_int pointer; memory base; atom index];
-           let value = scalar state env value_exp in
-           emit ["store_f32_masked"; "val:" ^ string_of_int pointer; atom value; atom index; atom bound]
-       | "store_grid_leader", [buffer_exp; value_exp] ->
-           let base = buffer env buffer_exp in
-           let value = scalar state env value_exp in
-           emit ["store_grid_leader_f32"; memory base; atom value]
-       | _ -> fail ("unsupported GPU statement " ^ name))
-  | _ -> fail "kernel body must end in a store"
-
-let parameter_type typ = match Types.get_desc typ with
-  | Types.Tconstr (path, _, _) -> Path.name path
-  | _ -> ""
-
-let last_component path = match List.rev (String.split_on_char '.' (Path.name path)) with
-  | name :: _ -> name | [] -> ""
-
-let rec kind_of_type typ = match Types.get_desc typ with
-  | Types.Tpoly (inner, _) -> kind_of_type inner
-  | Types.Tconstr (path, [element], _) when last_component path = "gpu_array" ->
-      (match kind_of_type element with "scalar_f32" -> "buffer_f32" | _ -> "unsupported")
-  | Types.Tconstr (path, [], _) ->
-      (match last_component path with
-       | "float" -> "scalar_f32" | "int" -> "scalar_i32" | "unit" -> "unit"
-       | _ -> "unsupported")
-  | _ -> "unsupported"
-
-let emit_implementation_signature binding =
-  let name = match binding.vb_pat.pat_desc with
-    | Tpat_var { name; _ } -> name.txt
-    | _ -> fail "kernel binding must have a simple name" in
-  Printf.printf "format\t2\nkernel\t%s\n" name;
-  let rec arrows index typ last_result_modes = match Types.get_desc typ with
-    | Types.Tpoly (inner, _) -> arrows index inner last_result_modes
-    | Types.Tarrow ((_, arg_modes, result_modes), arg, result, _) ->
-        Printf.printf "arg\t%d\t%s\t%s\n" index (kind_of_type arg) (serialize_arrow_mode arg_modes);
-        arrows (index + 1) result (Some result_modes)
-    | _ ->
-        (match last_result_modes with
-         | Some modes -> Printf.printf "result\t%s\t%s\n" (kind_of_type typ) (serialize_arrow_mode modes)
-         | None -> fail "typed implementation has no function result mode") in
-  arrows 0 binding.vb_pat.pat_type None
-
-let compile_kernel target structure =
-  let binding = List.find_map (fun item -> match item.str_desc with
-    | Tstr_value (_, bindings) -> List.find_opt (fun binding -> match binding.vb_pat.pat_desc with
-        | Tpat_var { name; _ } -> name.txt = target
-        | _ -> false) bindings
-    | _ -> None) structure.str_items in
-  let binding = match binding with Some binding -> binding | None -> fail ("no kernel function named " ^ target) in
-  emit_implementation_signature binding;
+       | Tpat_var {id;_}->expression s ((id,value)::env) body
+       | Tpat_any->expression s env body
+       | _->fail binding.vb_pat.pat_loc "only simple kernel let bindings are supported")
+  | Texp_sequence(a,_,b)->unit a.exp_loc (expression s env a);expression s env b
+  | Texp_ifthenelse(c,a,b)->
+      let c,_=scalar c.exp_loc (expression s env c) in
+      conditional s exp c (fun()->expression s env a) (fun()->Option.fold ~none:Void ~some:(expression s env) b)
+  | Texp_apply(callee,xs,_,_,_,_) ->
+      let op=primitive callee and xs=args exp.exp_loc xs in
+      (match op,xs with
+       | ("&&"|"||"),[a;b] ->
+           let a,_=scalar a.exp_loc(expression s env a) in
+           let literal value () = result(fun d->K.Const_bool(d,value)) in
+           if op="&&" then conditional s exp a (fun()->expression s env b) (literal false)
+           else conditional s exp a (literal true) (fun()->expression s env b)
+       | "not",[a] ->
+           let a,_=scalar a.exp_loc(expression s env a) in
+           conditional s exp a (fun()->result(fun d->K.Const_bool(d,false))) (fun()->result(fun d->K.Const_bool(d,true)))
+       | ("thread_idx_x"|"global_idx_x"),[u] ->
+           unit u.exp_loc (expression s env u);
+           const (fun d->if op="thread_idx_x" then K.Thread_idx_x d else K.Global_idx_x d) (Some(0L,2147483647L))
+       | ("load"|"load_masked"),buffer::index::tail ->
+           let base=memory buffer.exp_loc(expression s env buffer) in
+           let ix,_=scalar index.exp_loc(expression s env index) in
+           let bound=match op,tail with "load",[]->None | "load_masked",[n]->Some(fst(scalar n.exp_loc(expression s env n))) | _->fail exp.exp_loc "invalid load arity" in
+           let p=fresh s in emit s exp (K.Gep_f32(p,base,ix));
+           result(fun d->match bound with None->K.Load_f32(d,K.Value p) | Some n->K.Load_f32_masked(d,K.Value p,ix,n))
+       | ("store"|"store_masked"),buffer::index::tail ->
+           let base=memory buffer.exp_loc(expression s env buffer) in
+           let ix,_=scalar index.exp_loc(expression s env index) in
+           let bound,value=match op,tail with "store",[v]->None,v | "store_masked",[n;v]->Some(fst(scalar n.exp_loc(expression s env n))),v | _->fail exp.exp_loc "invalid store arity" in
+           let p=fresh s in emit s exp (K.Gep_f32(p,base,ix));
+           let v,_=scalar value.exp_loc(expression s env value) in
+           emit s exp (match bound with None->K.Store_f32(K.Value p,v)|Some n->K.Store_f32_masked(K.Value p,v,ix,n));Void
+       | "store_grid_leader",[buffer;v] ->
+           let p=memory buffer.exp_loc(expression s env buffer) in let v,_=scalar v.exp_loc(expression s env v) in
+           emit s exp (K.Store_grid_leader_f32(p,v));Void
+       | "warp_sum_f32",[v]->let v,_=scalar v.exp_loc(expression s env v) in result(fun d->K.Warp_reduce_sum_f32(d,v))
+       | ("i32_of_int"|"i32_to_int"),[v]->expression s env v
+       | ("+."|"*."|"+"|"-"|"*"|"i32_add"|"i32_sub"|"i32_mul"|"="|"<>"|"<"|"<="|">"|">="),[a;b] ->
+           let av,ar=scalar a.exp_loc(expression s env a) in
+           let bv,br=scalar b.exp_loc(expression s env b) in
+           (match op with
+            | "+."->result(fun d->K.Add_f32(d,av,bv)) | "*."->result(fun d->K.Mul_f32(d,av,bv))
+            | "+"|"-"|"*"|"i32_add"|"i32_sub"|"i32_mul" ->
+                let range=if String.starts_with ~prefix:"i32_" op then full_range else
+                  match ar,br with
+                  | Some(al,ah),Some(bl,bh)->
+                      let lo,hi=match op with
+                        | "+"->Int64.add al bl,Int64.add ah bh
+                        | "-"->Int64.sub al bh,Int64.sub ah bl
+                        | _->let ps=List.map (fun (x,y)->Int64.mul x y) [al,bl;al,bh;ah,bl;ah,bh] in List.fold_left min Int64.max_int ps,List.fold_left max Int64.min_int ps in
+                      checked exp.exp_loc (lo,hi)
+                  | _->fail exp.exp_loc "cannot prove native int arithmetic fits i32; use Int32 arithmetic" in
+                const (fun d-> match op with "+"|"i32_add"->K.Add_i32(d,av,bv)|"-"|"i32_sub"->K.Sub_i32(d,av,bv)|_->K.Mul_i32(d,av,bv)) range
+            | _ ->
+                let k=kind a.exp_env a.exp_loc a.exp_type in
+                if k=Buffer || k=Unit then fail exp.exp_loc "only scalar comparisons are supported";
+                let c=match op with "="->G.Eq|"<>"->G.Ne|"<"->G.Lt|"<="->G.Le|">"->G.Gt|_->G.Ge in
+                if k=Boolean && c<>G.Eq && c<>G.Ne then fail exp.exp_loc "only boolean equality comparisons are supported";
+                result(fun d->K.Compare(d,c,av,bv)))
+       | _->fail exp.exp_loc ("unsupported GPU call/arity: " ^ op))
+  | _->fail exp.exp_loc "unsupported GPU expression"
+and conditional s exp condition yes no =
+  let outer=s.body in
+  let region f = s.body<-[]; let value=f() in
+    let yield=match value with Void->None | Scalar(a,_)->Some a | Memory _->fail exp.exp_loc "buffer-valued branches are unsupported" in
+    {K.body=List.rev s.body;yield},value in
+  let a,av=region yes in let b,bv=region no in s.body<-outer;
+  let dst,value=match av,bv with
+    | Void,Void -> None,Void
+    | Scalar(_,ar),Scalar(_,br)->
+        let d=fresh s in
+        let range=match ar,br with Some(al,ah),Some(bl,bh)->Some(min al bl,max ah bh)|_->None in
+        Some(d,gpu_ty(kind exp.exp_env exp.exp_loc exp.exp_type)),Scalar(K.Value d,range)
+    | _->fail exp.exp_loc "conditional arms have incompatible results" in
+  emit s exp (K.If(dst,condition,a,b));value
+let compile target structure =
+  let binding=List.find_map (fun i->match i.str_desc with
+    | Tstr_value(_,bs)->List.find_opt (fun b->match b.vb_pat.pat_desc with Tpat_var{name;_}->name.txt=target | _->false) bs | _->None) structure.str_items in
+  let binding=match binding with Some b->b|None->fail Location.none "kernel binding not found" in
+  let env=binding.vb_expr.exp_env and loc=binding.vb_expr.exp_loc in
+  let rec signature i typ last = match Types.get_desc typ with
+    | Types.Tpoly(t,_)->signature i t last
+    | Types.Tarrow((_,am,rm),a,b,_)->let a={K.index=i;slot=slot env loc a am} in let rest,result=signature(i+1)b(Some rm) in a::rest,result
+    | _->match last with Some m->[],slot env loc typ m|None->fail loc "kernel must be a function" in
+  let args,result=signature 0 binding.vb_pat.pat_type None in
+  if result.ty<>G.Unit then fail loc "GPU entry kernels must return unit";
   match binding.vb_expr.exp_desc with
-  | Texp_function { params; body=Tfunction_body body; _ } ->
-      let env = List.mapi (fun index param ->
-        let ty = match param.fp_kind with
-          | Tparam_pat pattern -> parameter_type pattern.pat_type
-          | _ -> fail "optional kernel parameters are unsupported" in
-        let binding = match ty with
-          | "Gpu_dsl.gpu_array" -> Memory (Buffer index)
-          | "float" | "int" -> Scalar (Argument index)
-          | _ -> fail ("unsupported kernel parameter type " ^ ty) in
-        param.fp_param, binding) params in
-      statement { next_value=0 } env body
-  | _ -> fail "kernel must be a simple function with a body"
-
+  | Texp_function {params;body=Tfunction_body body;_}->
+      let env=List.mapi (fun i param->
+        let k=match param.fp_kind with Tparam_pat p->kind p.pat_env p.pat_loc p.pat_type|_->fail loc "optional parameters unsupported" in
+        let value=match k with Buffer->Memory(K.Buffer_arg i)|Unit->fail loc "unit kernel argument unsupported"|Native_int|Int32->Scalar(K.Arg i,full_range)|_->Scalar(K.Arg i,None) in
+        param.fp_param,value) params in
+      let s={next=0;body=[]} in unit body.exp_loc (expression s env body);
+      {K.name=target;args;result;body=List.rev s.body}
+  | _->fail loc "kernel must have a simple function body"
 let () =
-  if Array.length Sys.argv <> 3 then fail "usage: export_typedtree_modes FILE.cmt KERNEL_NAME";
-  let _, cmt = Cmt_format.read Sys.argv.(1) in
-  match cmt with
-  | None -> fail "no OxCaml typedtree annotation found"
-  | Some cmt -> match cmt.cmt_annots with
-      | Implementation structure -> compile_kernel Sys.argv.(2) structure
-      | _ -> fail "expected an OxCaml typed interface or implementation"
+  try
+    if Array.length Sys.argv<>3 then fail Location.none "usage: export_typedtree_modes FILE.cmt NAME";
+    let _,cmt=Cmt_format.read Sys.argv.(1) in
+    match cmt with
+    | Some cmt ->
+        Load_path.init ~auto_include:Load_path.no_auto_include ~visible:cmt.cmt_loadpath.visible ~hidden:cmt.cmt_loadpath.hidden;
+        (match cmt.cmt_annots with Implementation s->print_string(Gpu_metadata.encode(compile Sys.argv.(2) s))|_->fail Location.none "expected implementation")
+    | None->fail Location.none "missing typedtree"
+  with Source_span.Error(loc,msg)->prerr_endline(Source_span.to_string loc ^ ": " ^ msg);exit 2

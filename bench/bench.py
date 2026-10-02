@@ -91,13 +91,17 @@ def main():
     saxpy_module, saxpy = load_kernel(cuda, args.saxpy_cubin, "saxpy")
     dot_module, dot = load_kernel(cuda, args.dot_product_cubin, "dot_product")
     alpha = ctypes.c_float(1e-6)
-    n = ctypes.c_uint32(n_elements)
+    if not 0 <= n_elements <= 2**31 - 1:
+        raise ValueError("GPU native-int extent must fit signed i32")
+    n = ctypes.c_int32(n_elements)
     saxpy_arguments = (ctypes.c_uint64(sx.data_ptr()), ctypes.c_uint64(sy.data_ptr()), alpha)
     saxpy_arguments += (n,)
     vector_arguments = (ctypes.c_uint64(vx.data_ptr()), ctypes.c_uint64(vy.data_ptr()), ctypes.c_uint64(vz.data_ptr()), n)
 
     vector_threads = 128
     vector_blocks = (n_elements + vector_threads - 1) // vector_threads
+    if vector_blocks * vector_threads - 1 > 2**31 - 1:
+        raise ValueError("launch indices exceed the supported signed i32 range")
     launch(cuda, vector, vector_arguments, threads=vector_threads, blocks=vector_blocks, stream=stream)
     torch.cuda.synchronize()
     if not torch.allclose(vz, vx + vy):

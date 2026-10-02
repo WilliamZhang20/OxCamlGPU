@@ -16,3 +16,13 @@
 (rule
  (alias runtest)
  (action (run %{workspace_root}/test/run_oxcaml_tests.sh)))
+
+(test
+ (name test_control_flow)
+ (modules test_control_flow)
+ (libraries oxgpu))
+
+(test
+ (name test_frontend)
+ (modules test_frontend)
+ (libraries oxgpu))
