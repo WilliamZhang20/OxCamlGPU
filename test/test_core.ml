@@ -109,6 +109,13 @@ let () =
   expect_ok (Verifier.check_call {immutable_formal with args=[{name="p";value=ro}]} [actual ~permission:Immutable 90]);
   let reg_layout = Layout.Register {
     elements_per_lane=[1]; lanes_per_subgroup=[32]; subgroups_per_cta=[1]; order=[0] } in
+  let blocked={Layout.elements_per_lane=[2;1];lanes_per_subgroup=[4;8];
+    subgroups_per_cta=[2;1];order=[1;0]} in
+  List.iter (fun coordinate ->
+    let hardware=Layout.logical_to_hardware blocked coordinate in
+    if Layout.hardware_to_logical blocked hardware <> coordinate then
+      failwith "logical and hardware layout mappings must round-trip")
+    [[0;0];[3;7];[15;7]];
   let smem_layout = Layout.Shared { vector_width=1; order=[0]; swizzle=Layout.No_swizzle } in
   let shape=[Static 32] in
   let input=make_value ~locality:Global ~permission:Read_only 60
@@ -161,6 +168,20 @@ let () =
   if movement_target.Ptx_ir.launch.threads_per_cta <> Some (32,1,1) ||
      movement_target.Ptx_ir.launch.static_shared_bytes <> 128 then
     failwith "PTX target lowering must derive exact CTA and static shared-memory requirements";
+  let small_shared=make_value ~permission:Read_write
+      ~layout:(Layout.Shared {vector_width=1;order=[0];swizzle=Layout.No_swizzle}) 120
+      (MemRef([Static 16],Float32,Gpu_type.Shared))
+  and large_shared=make_value ~permission:Read_write
+      ~layout:(Layout.Shared {vector_width=1;order=[0];swizzle=Layout.No_swizzle}) 121
+      (MemRef([Static 64],Int32,Gpu_type.Shared)) in
+  let differently_sized_shared={name="different_shared_sizes";args=[];
+    body=[Shared_alloc small_shared;Shared_alloc large_shared]} in
+  let sized_target=Ptx_lowering.lower differently_sized_shared in
+  if sized_target.Ptx_ir.launch.static_shared_bytes <> 320 then
+    failwith "shared launch size must sum each allocation's shape and dtype";
+  let sized_ptx=Ptx.emit_target sized_target in
+  if not (contains sized_ptx "__shared_120[64]" && contains sized_ptx "__shared_121[256]") then
+    failwith "shared PTX declarations must use per-allocation byte sizes";
   List.iter (fun part -> if not (contains movement_ptx part) then
     failwith ("shared movement PTX missing " ^ part))
     [".shared .align 16 .b8 __shared_62[128];";
@@ -178,9 +199,31 @@ let () =
       Reduce_sum_f32(sum,products);Store_f32_grid_leader(result,sum)]} in
   expect_ok (Verifier.verify_kernel high_level_dot);
   let dot_ptx=Ptx.emit high_level_dot in
+  let dot_target=Ptx_lowering.lower high_level_dot in
+  if not (List.exists (function Ptx_ir.Tensor_mul_f32 _ -> true | _ -> false) dot_target.body) then
+    failwith "tensor multiply must retain its semantic operation in target IR";
+  (try
+     ignore (Ptx.emit_target {dot_target with body=[Ptx_ir.Mul_f32(products,tx,ty)]});
+     failwith "PTX scalar multiply accepted tensor values"
+   with Invalid_argument message when contains message "scalar f32 operands" -> ());
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("lowered dot PTX missing " ^ part))
     [".reqntid 32, 1, 1";"ld.global.f32";"mul.rn.f32";"shfl.sync.bfly.b32";"st.global.f32"];
+  let unrelated_global_index=make_value 130 I32 in
+  let independent_index_and_reduction={high_level_dot with name="independent_index_reduction";
+    body=Global_idx_x unrelated_global_index :: high_level_dot.body} in
+  ignore (Ptx_lowering.lower independent_index_and_reduction);
+  let wide_shape=[Static 64] in
+  let wide_mem=make_value ~locality:Global ~permission:Read_only 131
+      (MemRef(wide_shape,Float32,Gpu_type.Global))
+  and wide_tensor=make_value ~locality:Local ~layout:(Layout.Register {
+      elements_per_lane=[2];lanes_per_subgroup=[32];subgroups_per_cta=[1];order=[0]}) 132
+      (Tensor(wide_shape,Float32)) in
+  let wide_tile={name="wide_tile";args=[{name="src";value=wide_mem}];
+    body=[Load_tensor(wide_tensor,wide_mem)]} in
+  expect_ok (Verifier.verify_kernel wide_tile);
+  (try ignore (Compiler.compile_ptx wide_tile); failwith "multi-register tensor unexpectedly compiled"
+   with Invalid_argument message when contains message "multi-register tensor" -> ());
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("grid-leader predicate missing " ^ part)) ["%tid.y";"%tid.z"];
   let alias_sensitive_kernel y_ownership =

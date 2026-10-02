@@ -14,6 +14,8 @@ type operation =
   | Add_i32 of Ir.value * Ir.value * Ir.value
   | Add_f32 of Ir.value * Ir.value * Ir.value
   | Mul_f32 of Ir.value * Ir.value * Ir.value
+  | Tensor_scale_f32 of Ir.value * Ir.value * Ir.value
+  | Tensor_mul_f32 of Ir.value * Ir.value * Ir.value
   | Thread_idx_x of Ir.value
   | Global_idx_x of Ir.value
   | Gep_f32 of Ir.value * Ir.value * Ir.value
@@ -48,7 +50,8 @@ let results = function
   | Const_i32 (v, _) | Const_f32 (v, _) | Thread_idx_x v | Global_idx_x v
   | Gep_f32 (v, _, _) | Load_f32 (v, _) | Load_f32_masked (v, _, _, _)
   | Tile_load_f32 (v, _) | Tensor_lane_f32 (v, _) | Warp_butterfly_sum_f32 (v, _) -> [v]
-  | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _) -> [v]
+  | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _)
+  | Tensor_scale_f32 (v, _, _) | Tensor_mul_f32 (v, _, _) -> [v]
   | Store_f32 _ | Store_f32_masked _ | Tile_store_f32 _
   | Store_grid_leader_f32 _ | Barrier_cta | Return -> []
 
@@ -58,7 +61,8 @@ let operands = function
   | Branch(v,_,_) | Move(_,v) -> [v]
   | Const_i32 _ | Const_f32 _ | Thread_idx_x _ | Global_idx_x _ | Shared_alloc _
   | Barrier_cta | Return -> []
-  | Add_i32 (_, a, b) | Add_f32 (_, a, b) | Mul_f32 (_, a, b) -> [a;b]
+  | Add_i32 (_, a, b) | Add_f32 (_, a, b) | Mul_f32 (_, a, b)
+  | Tensor_scale_f32 (_, a, b) | Tensor_mul_f32 (_, a, b) -> [a;b]
   | Gep_f32 (_, p, i) -> [p;i]
   | Load_f32 (_, p) | Tile_load_f32 (_, p) | Tensor_lane_f32 (_, p)
   | Warp_butterfly_sum_f32 (_, p) -> [p]

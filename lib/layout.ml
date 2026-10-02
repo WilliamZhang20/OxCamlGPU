@@ -17,6 +17,61 @@ type shared = {
 
 type t = Register of register | Shared of shared
 
+(* A logical coordinate is decomposed into coordinates at each hardware
+   level. The per-dimension vectors keep this mapping compositional: target
+   lowering may later linearize or swizzle each level for a specific GPU. *)
+type hardware_coordinate = {
+  cta : int list;
+  subgroup : int list;
+  lane : int list;
+  register : int list;
+}
+
+let logical_to_hardware register logical =
+  let factors = List.combine register.elements_per_lane
+      (List.combine register.lanes_per_subgroup register.subgroups_per_cta) in
+  if List.length logical <> List.length factors then
+    invalid_arg "logical coordinate rank does not match register layout";
+  let parts = List.map2 (fun coordinate (elements, (lanes, subgroups)) ->
+    if coordinate < 0 then invalid_arg "logical coordinates must be nonnegative";
+    let per_lane, distributed = coordinate mod elements, coordinate / elements in
+    let lane = distributed mod lanes and cta = distributed / lanes in
+    let subgroup = cta mod subgroups and cta = cta / subgroups in
+    per_lane, lane, subgroup, cta) logical factors in
+  { register=List.map (fun (x,_,_,_) -> x) parts;
+    lane=List.map (fun (_,x,_,_) -> x) parts;
+    subgroup=List.map (fun (_,_,x,_) -> x) parts;
+    cta=List.map (fun (_,_,_,x) -> x) parts }
+
+let hardware_to_logical layout hardware =
+  let rank = List.length layout.elements_per_lane in
+  if List.exists (fun xs -> List.length xs <> rank)
+      [hardware.cta;hardware.subgroup;hardware.lane;hardware.register] then
+    invalid_arg "hardware coordinate rank does not match register layout";
+  List.init rank (fun dimension ->
+    let elements=List.nth layout.elements_per_lane dimension
+    and lanes=List.nth layout.lanes_per_subgroup dimension
+    and subgroups=List.nth layout.subgroups_per_cta dimension in
+    let register=List.nth hardware.register dimension
+    and lane=List.nth hardware.lane dimension
+    and subgroup=List.nth hardware.subgroup dimension
+    and cta=List.nth hardware.cta dimension in
+    if register < 0 || register >= elements || lane < 0 || lane >= lanes ||
+       subgroup < 0 || subgroup >= subgroups || cta <> 0 then
+      invalid_arg "hardware coordinate is outside this CTA register layout";
+    (((subgroup * lanes + lane) * elements) + register))
+
+(* Shared layouts currently preserve the logical extent. Swizzle-specific
+   padding can be added here without changing launch-contract construction. *)
+let shared_storage_bytes shape dtype layout = match layout with
+  | Shared _ ->
+      let bytes = Gpu_type.storage_bytes shape dtype in
+      let alignment = 16 in
+      if bytes > max_int - (alignment - 1) then
+        invalid_arg "shared storage alignment overflows the host integer range";
+      ((bytes + alignment - 1) / alignment) * alignment
+  | Register _ -> invalid_arg "shared storage size requires a shared layout"
+
 let valid_order rank order =
   List.length order = rank
   && List.sort compare order = List.init rank Fun.id

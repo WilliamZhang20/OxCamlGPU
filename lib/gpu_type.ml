@@ -13,6 +13,24 @@ type ty =
   | Tensor of shape * dtype
   | MemRef of shape * dtype * addr_space
 
+let dtype_storage_bytes = function Int32 | Float32 -> 4
+
+let shape_elements shape =
+  List.fold_left (fun n -> function
+    | Static extent when extent > 0 && n <= max_int / extent -> n * extent
+    | Static _ -> invalid_arg "shape storage size overflows the host integer range"
+    | Symbol _ | Dynamic -> invalid_arg "storage size requires a fully static shape") 1 shape
+
+let storage_bytes shape dtype =
+  let elements = shape_elements shape and element_bytes = dtype_storage_bytes dtype in
+  if elements > max_int / element_bytes then
+    invalid_arg "storage byte size overflows the host integer range";
+  elements * element_bytes
+
+let storage_bytes_of_ty = function
+  | Tensor (shape, dtype) | MemRef (shape, dtype, _) -> storage_bytes shape dtype
+  | _ -> invalid_arg "storage size is undefined for this type"
+
 let string_of_dim = function
   | Static n -> string_of_int n
   | Symbol name -> name

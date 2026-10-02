@@ -13,7 +13,9 @@ kernel.ml
   → Kernel_frontend.lower
   → semantic GPU IR and verification
   → optimizer
-  → PTX lowering and printer
+  → target strategy selection
+  → physical/register mapping
+  → PTX IR and printer
 ```
 
 - `tools/typedtree_support.ml` recognizes supported OxCaml types, modes, and primitive declarations. It depends on the matching compiler-libs.
@@ -21,7 +23,9 @@ kernel.ml
 - `Oxcaml_frontend.import` decodes metadata. `Kernel_frontend.lower` creates semantic IR values and calls the verifier.
 - `Verifier` checks types, SSA scope, modes, memory access, layouts, and shared-memory initialization. `Uniformity` rejects collectives reached by insufficiently uniform participation.
 - `Optimizer` currently reuses a prior load only when intervening writes cannot alias it.
-- `Ptx_lowering` selects and validates PTX-specific strategies. `Ptx` prints PTX and its launch contract.
+- `Ptx_lowering` selects and validates PTX-specific strategies. `Physical_ir` maps semantic SSA values to per-participant register tuples and rejects tensors the current PTX backend cannot expand. `Ptx_ir` contains target operations; `Ptx` prints PTX and its launch contract.
+
+The representation boundaries have distinct responsibilities: `Kernel_ast` is the versioned frontend transport format; `Ir` is semantic GPU SSA; `Physical_ir` records layout-derived per-participant registers; `Ptx_ir` contains legal target operations. Tensor arithmetic keeps its semantic operation kind in target IR through legality checks. The current backend only emits one register per lane for supported tensor layouts.
 
 The compiler adapter uses compiler APIs and Typedtree structures that are specific to an OxCaml build. Compile it with the matching compiler-libs. The shared schema modules are compiled separately for the host and adapter; host `.cmx` files are not linked into the adapter.
 
@@ -39,7 +43,7 @@ The metadata adapter transports uniqueness, locality, OxCaml domain portability,
 
 `Gpu_type` separates logical `Tensor(shape, dtype)` values from addressable `MemRef(shape, dtype, address_space)` storage. Shapes can be static, symbolic, or dynamic. The current source ABI erases buffer shapes to device pointers; extents and strides are not passed. A mask checks nonnegative index and `index < bound`, but the verifier cannot prove that the supplied bound fits the allocation.
 
-`Layout.Register` describes elements per lane, lanes per subgroup, subgroups per CTA, and dimension order. `Layout.Shared` describes vector width, order, and optional swizzle. These layouts describe data distribution and organization; they do not describe value uniformity or physical locality modes. Global MemRefs do not yet carry explicit layouts.
+`Layout.Register` describes factorized elements per lane, lanes per subgroup, subgroups per CTA, and dimension order. The physical IR stores one or more register slots per participant from this distribution. Multi-register tensor expansion is explicitly rejected by the current PTX backend. `Layout.Shared` describes vector width, order, and optional swizzle. These layouts describe data distribution and organization; they do not describe value uniformity or physical locality modes. Global MemRefs do not yet carry explicit layouts. A compositional logical-to-hardware coordinate mapping (including lane bit mappings, swizzles, and MMA layouts) remains future work.
 
 Mode facts are also separate from address space:
 
@@ -59,7 +63,7 @@ Source conditionals become scoped SSA regions with explicit yields. PTX lowering
 
 The PTX backend covers the operations used by current examples and selected direct-IR cases. Elementwise indexing and masked tails can span multiple CTAs. Tensor movement and reductions currently support only a 32-element f32 tile distributed one element per lane across one 32-thread CTA. The reduction lowers to lane extraction and butterfly shuffles. `Gpu.warp_sum_f32` is the source-level scalar escape hatch; shaped tensor expressions are not yet imported from OxCaml.
 
-There is no matmul operation, tiled matmul strategy, multi-CTA reduction strategy, or tensor-core lowering. These require both a richer source/IR model and target lowering; adding source syntax alone is insufficient.
+There is no matmul operation, tiled matmul strategy, multi-CTA reduction strategy, or tensor-core lowering. These require both a richer source/IR model and target lowering; adding source syntax alone is insufficient. Shared-memory launch sizing is derived from static shape and dtype; layout-specific padding and swizzle storage requirements are not yet modeled.
 
 ## Validation and benchmarks
 

@@ -21,6 +21,11 @@ let maximum_value_id kernel =
   List.fold_left (fun max_id value -> max max_id value.Ir.id) 0 (Ptx_ir.all_values kernel)
 
 let emit_target (kernel : Ptx_ir.kernel) =
+  List.iter (function
+    | Ptx_ir.Mul_f32 (dst, a, c)
+      when dst.Ir.ty <> Gpu_type.F32 || a.Ir.ty <> Gpu_type.F32 || c.Ir.ty <> Gpu_type.F32 ->
+        invalid_arg "PTX scalar Mul_f32 requires scalar f32 operands; tensor operations use tensor-specific IR"
+    | _ -> ()) kernel.body;
   let max_id = maximum_value_id kernel in
   let offset_scratch = "%rd" ^ string_of_int (max_id + 2) in
   let address_scratch = "%rd" ^ string_of_int (max_id + 3) in
@@ -36,7 +41,10 @@ let emit_target (kernel : Ptx_ir.kernel) =
   let f32_scratch id = "%f" ^ string_of_int id in
   let tid_scratch = b32_scratch tid_scratch_id in
   let shared_symbols=Hashtbl.create 4 in
-  List.iter (function Ptx_ir.Shared_alloc m -> Hashtbl.add shared_symbols m.id ("__shared_" ^ string_of_int m.id) | _->()) kernel.body;
+  let shared_sizes=Hashtbl.create 4 in
+  List.iter (function Ptx_ir.Shared_alloc m ->
+    Hashtbl.replace shared_symbols m.id ("__shared_" ^ string_of_int m.id);
+    Hashtbl.replace shared_sizes m.id (Gpu_type.storage_bytes_of_ty m.ty) | _->()) kernel.body;
   let b = Buffer.create 1024 in
   let line s = Buffer.add_string b (s ^ "\n") in
   line ".version 8.5";
@@ -51,7 +59,8 @@ let emit_target (kernel : Ptx_ir.kernel) =
     | Some (x,y,z) -> Printf.sprintf ") .reqntid %d, %d, %d" x y z in
   line launch_suffix;
   line "{";
-  Hashtbl.iter (fun _ symbol -> line ("  .shared .align 16 .b8 " ^ symbol ^ "[128];")) shared_symbols;
+  Hashtbl.iter (fun id symbol -> line (Printf.sprintf "  .shared .align 16 .b8 %s[%d];"
+    symbol (Hashtbl.find shared_sizes id))) shared_symbols;
   line "  .reg .pred %pred<8>;";
   line (Printf.sprintf "  .reg .pred %%p<%d>;" register_count);
   line (Printf.sprintf "  .reg .b32 %%r<%d>;" register_count);
@@ -113,7 +122,9 @@ let emit_target (kernel : Ptx_ir.kernel) =
         line (Printf.sprintf "  add.u64 %s, %s, %s;" (ptrreg dst) (ptrreg base) offset_scratch)
     | Ptx_ir.Add_i32 (dst, a, c) -> line (Printf.sprintf "  add.u32 %s, %s, %s;" (reg dst) (reg a) (reg c))
     | Ptx_ir.Add_f32 (dst, a, c) -> line (Printf.sprintf "  add.rn.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
-    | Ptx_ir.Mul_f32 (dst, a, c) -> line (Printf.sprintf "  mul.rn.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
+    | Ptx_ir.Mul_f32 (dst, a, c)
+    | Ptx_ir.Tensor_scale_f32 (dst, a, c)
+    | Ptx_ir.Tensor_mul_f32 (dst, a, c) -> line (Printf.sprintf "  mul.rn.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
     | Ptx_ir.Load_f32 (dst, ptr) -> line (Printf.sprintf "  ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
     | Ptx_ir.Load_f32_masked (dst, ptr, ix, bound) ->
         line (Printf.sprintf "  setp.ge.s32 %%pred1, %s, 0;" (reg ix));
@@ -174,4 +185,15 @@ let emit_target (kernel : Ptx_ir.kernel) =
   line "}";
   Buffer.contents b
 
-let emit kernel = emit_target (Ptx_lowering.lower kernel)
+let emit_physical (kernel : Physical_ir.kernel) =
+  (* Keep the physical map at the emission boundary so a future multi-register
+     tensor expansion changes this stage without changing semantic SSA. *)
+  List.iter (fun operation ->
+    List.iter (fun value ->
+      match value.Ir.ty with
+      | Gpu_type.Tensor _ when Physical_ir.lookup kernel value = None ->
+          invalid_arg "PTX emission received a tensor without a physical register mapping"
+      | _ -> ()) (Ptx_ir.operands operation @ Ptx_ir.results operation)) kernel.target.Ptx_ir.body;
+  emit_target kernel.target
+
+let emit kernel = emit_physical (Physical_ir.physicalize (Ptx_lowering.lower kernel))

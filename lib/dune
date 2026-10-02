@@ -1,4 +1,4 @@
 (library
  (name oxgpu)
- (modules execution gpu_type gpu_mode layout ir alias_analysis verification_error call_verifier source_span kernel_ast gpu_metadata uniformity verifier optimizer kernel_frontend oxcaml_frontend ptx_ir ptx_lowering ptx compiler)
+ (modules execution gpu_type gpu_mode layout ir alias_analysis verification_error call_verifier source_span kernel_ast gpu_metadata uniformity verifier optimizer kernel_frontend oxcaml_frontend ptx_ir ptx_lowering physical_ir ptx compiler)
  (wrapped false))
