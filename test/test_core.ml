@@ -116,6 +116,24 @@ let () =
     if Layout.hardware_to_logical blocked hardware <> coordinate then
       failwith "logical and hardware layout mappings must round-trip")
     [[0;0];[3;7];[15;7]];
+  let interleaved={Layout.elements_per_lane=[2];lanes_per_subgroup=[32];
+      subgroups_per_cta=[1];lane_mapping=Layout.Interleaved;
+    lane_order=[0];register_order=[0];subgroup_order=[0]} in
+  let map index=Layout.mapped_to_hardware interleaved [index] in
+  if (map 0).lane_id <> 0 || (map 0).register_id <> 0 ||
+     (map 1).lane_id <> 1 || (map 1).register_id <> 0 ||
+     (map 32).lane_id <> 0 || (map 32).register_id <> 1 then
+    failwith "interleaved layout must map each 32-element chunk across lanes";
+  List.iter (fun index ->
+    if Layout.mapped_hardware_to_logical interleaved (map index) <> [index] then
+      failwith "mapped register coordinates must round-trip") [0;1;31;32;33;63];
+  (match Layout.validate [Static 64] (Layout.Mapped_register interleaved) with
+   | Ok () -> () | Error message -> failwith ("valid interleaved layout rejected: " ^ message));
+  let permuted={Layout.elements_per_lane=[1;1];lanes_per_subgroup=[4;8];
+      subgroups_per_cta=[1;1];lane_mapping=Layout.Blocked;
+    lane_order=[1;0];register_order=[0;1];subgroup_order=[0;1]} in
+  if (Layout.mapped_to_hardware permuted [1;2]).lane_id <> 10 then
+    failwith "mapped lane dimension order must control hardware lane numbering";
   let smem_layout = Layout.Shared { vector_width=1; order=[0]; swizzle=Layout.No_swizzle } in
   let shape=[Static 32] in
   let input=make_value ~locality:Global ~permission:Read_only 60
@@ -168,6 +186,10 @@ let () =
   if movement_target.Ptx_ir.launch.threads_per_cta <> Some (32,1,1) ||
      movement_target.Ptx_ir.launch.static_shared_bytes <> 128 then
     failwith "PTX target lowering must derive exact CTA and static shared-memory requirements";
+  let movement_physical=Physical_ir.physicalize movement_target in
+  let lane17=Physical_ir.coordinate movement_physical from_global [17] in
+  if lane17.Layout.lane_id <> 17 || lane17.register_id <> 0 then
+    failwith "physical tensor values must retain their logical-to-hardware mapping";
   let small_shared=make_value ~permission:Read_write
       ~layout:(Layout.Shared {vector_width=1;order=[0];swizzle=Layout.No_swizzle}) 120
       (MemRef([Static 16],Float32,Gpu_type.Shared))
@@ -182,6 +204,15 @@ let () =
   let sized_ptx=Ptx.emit_target sized_target in
   if not (contains sized_ptx "__shared_120[64]" && contains sized_ptx "__shared_121[256]") then
     failwith "shared PTX declarations must use per-allocation byte sizes";
+  let padded_shared=make_value ~permission:Read_write
+      ~layout:(Layout.Padded_shared {
+        base={vector_width=1;order=[1;0];swizzle=Layout.No_swizzle};row_padding_bytes=16 }) 122
+      (MemRef([Static 4;Static 8],Float32,Gpu_type.Shared)) in
+  let padded_kernel={name="padded_shared";args=[];body=[Shared_alloc padded_shared]} in
+  let padded_target=Ptx_lowering.lower padded_kernel in
+  if padded_target.Ptx_ir.launch.static_shared_bytes <> 192 ||
+     not (contains (Ptx.emit_target padded_target) "__shared_122[192]") then
+    failwith "shared row padding must affect the allocation and launch contract";
   List.iter (fun part -> if not (contains movement_ptx part) then
     failwith ("shared movement PTX missing " ^ part))
     [".shared .align 16 .b8 __shared_62[128];";
@@ -213,17 +244,68 @@ let () =
   let independent_index_and_reduction={high_level_dot with name="independent_index_reduction";
     body=Global_idx_x unrelated_global_index :: high_level_dot.body} in
   ignore (Ptx_lowering.lower independent_index_and_reduction);
+  let one_warp_mapped={Layout.elements_per_lane=[1];lanes_per_subgroup=[32];
+    subgroups_per_cta=[1];lane_mapping=Layout.Interleaved;lane_order=[0];
+    register_order=[0];subgroup_order=[0]} in
+  let mapped_tensor id=make_value ~locality:Local
+      ~layout:(Layout.Mapped_register one_warp_mapped) id (Tensor(shape,Float32)) in
+  let mapped_x=mapped_tensor 140 and mapped_y=mapped_tensor 141
+  and mapped_products=mapped_tensor 142 and mapped_sum=make_value 143 F32 in
+  let mapped_dot={high_level_dot with name="mapped_dot";body=[
+      Load_tensor(mapped_x,x);Load_tensor(mapped_y,y);Mul_tensor_f32(mapped_products,mapped_x,mapped_y);
+      Reduce_sum_f32(mapped_sum,mapped_products);Store_f32_grid_leader(result,mapped_sum)]} in
+  expect_ok (Verifier.verify_kernel mapped_dot);
+  ignore (Compiler.compile_ptx mapped_dot);
   let wide_shape=[Static 64] in
   let wide_mem=make_value ~locality:Global ~permission:Read_only 131
       (MemRef(wide_shape,Float32,Gpu_type.Global))
-  and wide_tensor=make_value ~locality:Local ~layout:(Layout.Register {
-      elements_per_lane=[2];lanes_per_subgroup=[32];subgroups_per_cta=[1];order=[0]}) 132
+  and wide_tensor=make_value ~locality:Local ~layout:(Layout.Mapped_register interleaved) 132
       (Tensor(wide_shape,Float32)) in
   let wide_tile={name="wide_tile";args=[{name="src";value=wide_mem}];
     body=[Load_tensor(wide_tensor,wide_mem)]} in
   expect_ok (Verifier.verify_kernel wide_tile);
-  (try ignore (Compiler.compile_ptx wide_tile); failwith "multi-register tensor unexpectedly compiled"
-   with Invalid_argument message when contains message "multi-register tensor" -> ());
+  let wide_rhs=make_value ~locality:Global ~permission:Read_only 136
+      (MemRef(wide_shape,Float32,Gpu_type.Global))
+  and wide_out=make_value ~ownership:Unique ~locality:Global ~permission:Read_write 133
+      (MemRef(wide_shape,Float32,Gpu_type.Global))
+  and wide_scaled=make_value ~locality:Local ~layout:(Layout.Mapped_register interleaved) 134
+      (Tensor(wide_shape,Float32))
+  and wide_rhs_tensor=make_value ~locality:Local ~layout:(Layout.Mapped_register interleaved) 137
+      (Tensor(wide_shape,Float32))
+  and wide_product=make_value ~locality:Local ~layout:(Layout.Mapped_register interleaved) 138
+      (Tensor(wide_shape,Float32))
+  and wide_factor=make_value 135 F32 in
+  let wide_kernel={name="wide_interleaved";
+    args=[{name="src";value=wide_mem};{name="rhs";value=wide_rhs};{name="dst";value=wide_out}];
+    body=[Load_tensor(wide_tensor,wide_mem);Load_tensor(wide_rhs_tensor,wide_rhs);Const_f32(wide_factor,2.);
+      Scale_tensor_f32(wide_scaled,wide_tensor,wide_factor);
+      Mul_tensor_f32(wide_product,wide_scaled,wide_rhs_tensor);Store_tensor(wide_out,wide_product)]} in
+  expect_ok (Verifier.verify_kernel wide_kernel);
+  let wide_ptx=Compiler.compile_ptx wide_kernel in
+  if count wide_ptx "ld.global.f32" <> 4 || count wide_ptx "st.global.f32" <> 2 ||
+     count wide_ptx "mul.rn.f32" <> 4 || not (contains wide_ptx ", 128;") then
+    failwith "interleaved two-register tiles must load, scale, multiply, and store each lane value";
+  let blocked_layout=Layout.Mapped_register {interleaved with lane_mapping=Layout.Blocked} in
+  let blocked_value value={value with layout=Some blocked_layout} in
+  let blocked_tensor=blocked_value wide_tensor and blocked_rhs=blocked_value wide_rhs_tensor
+  and blocked_scaled=blocked_value wide_scaled and blocked_product=blocked_value wide_product in
+  let blocked_kernel={wide_kernel with name="wide_blocked";body=[
+      Load_tensor(blocked_tensor,wide_mem);Load_tensor(blocked_rhs,wide_rhs);Const_f32(wide_factor,2.);
+      Scale_tensor_f32(blocked_scaled,blocked_tensor,wide_factor);
+      Mul_tensor_f32(blocked_product,blocked_scaled,blocked_rhs);Store_tensor(wide_out,blocked_product)]} in
+  expect_ok (Verifier.verify_kernel blocked_kernel);
+  let blocked_ptx=Compiler.compile_ptx blocked_kernel in
+  if count blocked_ptx "ld.global.f32" <> 4 || count blocked_ptx "st.global.f32" <> 2 ||
+     not (contains blocked_ptx ", 8;") || not (contains blocked_ptx ", 4;") then
+    failwith "blocked two-register mapping must use adjacent elements per lane";
+  let wide_sum=make_value 139 F32 in
+  let wide_reduction={name="wide_reduction";
+    args=[{name="src";value=wide_mem}];body=[Load_tensor(wide_tensor,wide_mem);
+      Reduce_sum_f32(wide_sum,wide_tensor)]} in
+  expect_ok (Verifier.verify_kernel wide_reduction);
+  let reduction_ptx=Compiler.compile_ptx wide_reduction in
+  if not (contains reduction_ptx "add.rn.f32" && contains reduction_ptx "shfl.sync.bfly.b32") then
+    failwith "wide reduction must sum local register slots before the warp reduction";
   List.iter (fun part -> if not (contains dot_ptx part) then
     failwith ("grid-leader predicate missing " ^ part)) ["%tid.y";"%tid.z"];
   let alias_sensitive_kernel y_ownership =
@@ -244,4 +326,58 @@ let () =
     failwith "aliased store incorrectly preserved a cached global load";
   if count unique_ptx "ld.global.f32" <> 1 then
     failwith "unique noalias fact did not eliminate the redundant global load";
+  if meet_locality Global Local <> Local || meet_locality Global Global <> Global then
+    failwith "locality meet must keep the weaker lifetime";
+  if meet_permission Immutable Read_only <> Read_only ||
+     meet_permission Read_write Read_write <> Read_write then
+    failwith "permission meet must not invent stronger access";
+  if meet_gpu_boundary Boundary_portable Boundary_local <> Boundary_unspecified ||
+     meet_gpu_boundary Boundary_portable Boundary_portable <> Boundary_portable then
+    failwith "gpu-boundary meet must agree or fall back to unspecified";
+  let buffer_slot =
+    { Kernel_ast.loc=Source_span.synthetic; ty=MemRef([Dynamic],Float32,Gpu_type.Global);
+      ownership=Unique; locality=Global; domain_portability=Domain_nonportable;
+      gpu_boundary=Boundary_unspecified; permission=Read_write } in
+  let scalar_slot =
+    { Kernel_ast.loc=Source_span.synthetic; ty=F32; ownership=Aliased; locality=Global;
+      domain_portability=Domain_nonportable; gpu_boundary=Boundary_unspecified;
+      permission=Read_only } in
+  let stamped=Kernel_frontend.lower {
+    name="boundary_stamp";
+    args=[{index=0;slot=buffer_slot};{index=1;slot=scalar_slot}];
+    result={buffer_slot with ty=Unit; ownership=Aliased; permission=Read_only};
+    body=[]} in
+  let buf=(List.nth stamped.args 0).value and scalar=(List.nth stamped.args 1).value in
+  if buf.gpu_boundary <> Boundary_portable then
+    failwith "buffer formals must derive Boundary_portable at kernel entry";
+  if scalar.gpu_boundary <> Boundary_unspecified then
+    failwith "scalar formals must keep Boundary_unspecified";
+  expect_ok (Launch_contract.check stamped [
+    Launch_contract.buffer ~ownership:Unique ~permission:Read_write 0;
+    Launch_contract.buffer ~permission:Read_only ~gpu_boundary:Boundary_unspecified 1]);
+  expect_error "E_GPU_BOUNDARY_REQUIRED"
+    (Launch_contract.check stamped [
+      Launch_contract.buffer ~ownership:Unique ~permission:Read_write
+        ~gpu_boundary:Boundary_unspecified 0;
+      Launch_contract.buffer ~permission:Read_only ~gpu_boundary:Boundary_unspecified 1]);
+  expect_error "E_UNIQUE_REQUIRED"
+    (Launch_contract.check stamped [
+      Launch_contract.buffer ~permission:Read_write 0;
+      Launch_contract.buffer ~permission:Read_only ~gpu_boundary:Boundary_unspecified 1]);
+  let join_kernel_ast : Kernel_ast.t = {
+    name="join_meet";
+    args=[];
+    result={loc=Source_span.synthetic;ty=Unit;ownership=Aliased;locality=Global;
+      domain_portability=Domain_nonportable;gpu_boundary=Boundary_unspecified;
+      permission=Read_only};
+    body=[
+      Kernel_ast.instruction (Const_bool(0,true));
+      Kernel_ast.instruction (If(Some(3,F32),Value 0,
+        {body=[Kernel_ast.instruction (Const_f32(1,1.))]; yield=Some(Value 1)},
+        {body=[Kernel_ast.instruction (Const_f32(2,2.))]; yield=Some(Value 2)}))]} in
+  let joined=Kernel_frontend.lower join_kernel_ast in
+  (match List.find_map (function If(Some dst,_,_,_) -> Some dst | _ -> None) joined.body with
+   | Some dst when dst.ownership=Aliased && dst.locality=Local &&
+       dst.permission=Read_only && dst.provenance=None -> ()
+   | _ -> failwith "branch join must meet to aliased local readable scalar facts");
   print_endline "verifier semantic tests passed"

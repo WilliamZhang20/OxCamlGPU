@@ -2,6 +2,12 @@ open Gpu_type
 open Gpu_mode
 open Ir
 
+(* Buffer formals crossed the host/device launch boundary. That GPU-boundary
+   fact is derived here; the OxCaml adapter does not import it. *)
+let entry_gpu_boundary = function
+  | Ptr _ | MemRef _ -> Boundary_portable
+  | _ -> Boundary_unspecified
+
 let lower (source : Kernel_ast.t) =
   if source.result.ty <> Unit then invalid_arg "GPU kernel entry points must return unit";
   let args=List.mapi (fun index (arg : Kernel_ast.argument) ->
@@ -9,7 +15,8 @@ let lower (source : Kernel_ast.t) =
     let s=arg.slot in
     let provenance=match s.ty with Ptr _|MemRef _->Some index|_->None in
     {name="arg" ^ string_of_int index;value=make_value ~loc:s.loc ~ownership:s.ownership
-      ~locality:s.locality ~domain_portability:s.domain_portability ~gpu_boundary:s.gpu_boundary
+      ~locality:s.locality ~domain_portability:s.domain_portability
+      ~gpu_boundary:(entry_gpu_boundary s.ty)
       ~permission:s.permission ~provenance index s.ty}) source.args in
   let used=Hashtbl.create 32 in
   let rec lower_body definitions body =
@@ -19,11 +26,15 @@ let lower (source : Kernel_ast.t) =
           | Some v -> v | None -> Source_span.fail loc "undefined or out-of-scope frontend value" in
     List.map (fun ({op;loc} : Kernel_ast.instruction) ->
       let atom=operand loc in
-      let define ?base id ty =
+      let define ?(ownership=Aliased) ?(locality=Local)
+          ?(domain_portability=Domain_portability_unspecified)
+          ?(gpu_boundary=Boundary_unspecified)
+          ?(permission=Read_only) ?provenance ?base id ty =
         if id<0 || id>max_int-List.length args || Hashtbl.mem used id then Source_span.fail loc "invalid or duplicate frontend SSA id";
         Hashtbl.add used id ();
         let value=match base with
-          | None->make_value ~loc (List.length args+id) ty
+          | None->make_value ~loc ~ownership ~locality ~domain_portability
+              ~gpu_boundary ~permission ?provenance (List.length args+id) ty
           | Some base->make_value ~loc ~ownership:Aliased ~locality:Local
               ~domain_portability:base.domain_portability ~gpu_boundary:base.gpu_boundary
               ~permission:base.permission ~provenance:base.provenance (List.length args+id) ty in
@@ -57,7 +68,18 @@ let lower (source : Kernel_ast.t) =
               match Hashtbl.find_opt env i with Some v->v | None->Source_span.fail loc "undefined branch yield") r.yield in
             {body;yield} in
           let a=region a in let b=region b in
-          let dst=Option.map (fun (d,t)->define d t) dst in If(dst,c,a,b)) body in
+          let dst=Option.map (fun (d,t)->
+            match a.yield, b.yield with
+            | Some left, Some right ->
+                define ~ownership:Aliased
+                  ~locality:(meet_locality left.locality right.locality)
+                  ~domain_portability:(meet_domain_portability
+                    left.domain_portability right.domain_portability)
+                  ~gpu_boundary:(meet_gpu_boundary left.gpu_boundary right.gpu_boundary)
+                  ~permission:(meet_permission left.permission right.permission)
+                  d t
+            | _ -> define d t) dst in
+          If(dst,c,a,b)) body in
   let body=lower_body (Hashtbl.create 32) source.body in
   let kernel={name=source.name;args;body} in
   Verifier.verify_exn kernel; kernel

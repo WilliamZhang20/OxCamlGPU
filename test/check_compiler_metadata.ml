@@ -30,6 +30,11 @@ let () =
   if input.ownership<>Gpu_mode.Aliased || input.permission<>Gpu_mode.Read_only ||
      output.ownership<>Gpu_mode.Unique || output.permission<>Gpu_mode.Read_write then
     failwith "OxCaml typedtree modes did not reach GPU IR";
+  if input.gpu_boundary<>Gpu_mode.Boundary_portable ||
+     output.gpu_boundary<>Gpu_mode.Boundary_portable then
+    failwith "buffer formals did not derive GPU-boundary portability at lower";
+  if (List.nth saxpy.args 2).value.gpu_boundary<>Gpu_mode.Boundary_unspecified then
+    failwith "scalar formals incorrectly acquired GPU-boundary portability";
   if (List.nth vector_add.args 2).value.ownership<>Gpu_mode.Unique then
     failwith "OxCaml vector_add uniqueness did not reach GPU IR";
   if not (List.exists (function Ir.Const_f32 (_, 2.5) -> true | _ -> false) literal.body) then

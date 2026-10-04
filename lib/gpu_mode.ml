@@ -36,3 +36,34 @@ let gpu_boundary_satisfies ~required actual =
   | Boundary_portable, Boundary_portable -> true
   | Boundary_portable, (Boundary_local | Boundary_unspecified) -> false
   | (Boundary_local | Boundary_unspecified), _ -> true
+
+(* Branch/join meets keep the weaker common fact so a destination never
+   strengthens either arm. Ownership of scalar joins is always Aliased. *)
+let meet_locality a b =
+  match a, b with
+  | Global, Global -> Global
+  | _ -> Local
+
+let meet_domain_portability a b =
+  match a, b with
+  | Domain_portable, Domain_portable -> Domain_portable
+  | Domain_nonportable, Domain_nonportable -> Domain_nonportable
+  | _ -> Domain_portability_unspecified
+
+let meet_gpu_boundary a b =
+  match a, b with
+  | Boundary_portable, Boundary_portable -> Boundary_portable
+  | Boundary_local, Boundary_local -> Boundary_local
+  | _ -> Boundary_unspecified
+
+let meet_permission a b =
+  match a, b with
+  | Immutable, Immutable -> Immutable
+  | Write_only, Write_only -> Write_only
+  | Read_write, Read_write -> Read_write
+  | (Read_only | Immutable), (Read_only | Immutable) -> Read_only
+  | (Read_write | Write_only), (Read_write | Write_only) when can_write a && can_write b ->
+      if can_read a && can_read b then Read_write else Write_only
+  | _ when can_read a && can_read b -> Read_only
+  | _ when can_write a && can_write b -> Write_only
+  | _ -> Read_only
