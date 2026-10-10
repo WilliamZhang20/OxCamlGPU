@@ -164,6 +164,21 @@ if [[ "$choose_64" != "gemm_bm64_bn256_s2 64 256 32 160" ]]; then
   echo "print-config 64x256 s2: $choose_64" >&2
   exit 1
 fi
+# Higher-order use, closures and polymorphism are erased by inlining: twice
+# applied to two different functions leaves two multiplies and two adds, the
+# closure over the formal reads it directly, and the polymorphic identity
+# leaves nothing at all. No indirect call, no closure record.
+run_ptx_emitter "$tmpdir/functional.gpu" > "$tmpdir/functional.ptx"
+if [[ $(rg -c '^body\tmul_i32\t' "$tmpdir/functional.gpu") != 2 ]]; then
+  echo "functional: twice over a closure should inline to two multiplies" >&2
+  exit 1
+fi
+if [[ $(rg -c '^body\tadd_i32\t' "$tmpdir/functional.gpu") != 2 ]]; then
+  echo "functional: twice over a lambda should inline to two adds" >&2
+  exit 1
+fi
+rg -q 'st\.global\.f32' "$tmpdir/functional.ptx"
+
 # The constant for-loop unrolls into stores at y[0..3]: consecutive, and the
 # first index is a multiple of four, so they fuse into one 16-byte store.
 run_ptx_emitter "$tmpdir/indexed_stores.gpu" > "$tmpdir/indexed_stores.ptx"

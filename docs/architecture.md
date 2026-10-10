@@ -19,6 +19,9 @@ the same way.
 | `compiler.ml` | The driver, at the root as the library's front door |
 | `dsl/` | The author-facing `Gpu` API |
 
+How much functional code reaches PTX, and what it would take to widen that,
+is assessed in [functions.md](functions.md).
+
 Every module carries an `.mli`, which is the house convention, except the four
 that exist only to define IR datatypes: `ir`, `ptx_ir`, `kernel_ast`, and
 `gpu_type`. Every constructor in those is matched on somewhere downstream, so a

@@ -142,6 +142,11 @@ done
 
 # A small fixture keeps non-kernel examples from carrying adapter-only syntax
 # just to exercise literal lowering.
+# Higher-order use, closures and polymorphism must lower by inlining.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/functional.cmo" test/fixtures/functional.ml
+"$tmp/export_typedtree_modes" "$tmp/functional.cmt" functional > "$out/functional.gpu"
+
 # The index operators must reach i32 arithmetic with no range proof.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/idx_ops.cmo" test/fixtures/idx_ops.ml
