@@ -26,12 +26,19 @@ Emit an OxCaml specialization with `emit_gemm_ptx --gpu …/NAME.gpu`.
 | **Compute** | `thread_idx_*` / `block_idx_*`, `barrier_cta`, elect predicates, WGMMA fence/wait/commit |
 | **Memory** | global load/store (+f32x4), `shared`, shared load/store, `cp_async_*`, TMA, indexed mbarrier sets, GMMA descriptors |
 
-What the compiler supplies rather than asks for: the GMMA descriptor's
-leading/stride/layout fields, which follow from the shared tile; the row and
-column of each accumulator register inside a warpgroup's tile, which is the
-WGMMA layout; and vector widths for stores. Those are hardware encodings, not
-schedule choices. Tile sizes, stage depth, warp roles, barrier order, CTA
-order and which rows a warpgroup owns stay with the author.
+What the compiler supplies rather than asks for:
+
+- the GMMA descriptor's leading/stride/layout fields, from the shared tile;
+- the row and column of each accumulator register inside a warpgroup's tile,
+  which is the WGMMA layout;
+- the warpgroup width behind `warpgroup_index`;
+- this CTA's tile under a grouped order, given the group height;
+- vector widths for stores.
+
+What stays with the author: tile sizes, pipeline depth, the group height, the
+consumer/producer split point, barrier order, and which 64 rows a warpgroup
+owns. The rule is that hardware encodings and standard mappings belong to the
+compiler, and anything you would tune belongs to the schedule.
 
 There is no `Gpu.matmul`, and no IR-builder path either. Schedules are
 ordinary OxCaml using those ops; the Hopper kernel is
@@ -133,6 +140,6 @@ it needs nothing from the compiler.
 
 - A persistent CTA loop, 132 CTAs over the 132 SMs, which is how cuBLAS
   launches. Worth the last few percent; needs no new compiler support.
-- The grouped CTA order is still 15 lines of `div`/`rem` in the kernel, and
-  the warp roles are still derived from raw thread arithmetic. Both are
-  candidates for the same treatment the accumulator layout got.
+- The consumer/producer split still reads as three comparisons against a
+  thread index. That is close to irreducible, since the split point is the
+  schedule's choice, but a warp-role helper could still name it.

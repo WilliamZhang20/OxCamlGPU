@@ -48,6 +48,7 @@ type instr =
   | Block_idx_x of value
   | Block_idx_y of value
   | Div_i32 of value * value * value
+  | Min_i32 of value * value * value
   | Rem_i32 of value * value * value
   | Mad_f32 of value * value * value * value
   (* Addressing and global memory *)
@@ -145,7 +146,7 @@ let results = function
   | If(dst,_,_,_) | If_uni(dst,_,_,_) -> Option.to_list dst
   | Const_i32 (v, _) | Const_f32 (v, _) | Thread_idx_x v | Global_idx_x v
   | Block_idx_x v | Block_idx_y v | Gep_f32 (v, _, _) -> [v]
-  | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _) | Mad_f32 (v, _, _, _) | Div_i32 (v, _, _) | Rem_i32 (v, _, _)
+  | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _) | Mad_f32 (v, _, _, _) | Div_i32 (v, _, _) | Rem_i32 (v, _, _) | Min_i32 (v, _, _)
   | Load_f32 (v, _) | Load_f32_masked (v, _, _, _)
   | Shared_alloc v | Shared_load_f32 (v, _, _) | Load_tensor (v, _) | Load_tensor_masked (v, _, _, _) -> [v]
   | Load_f32x4 (a, b, c, d, _) | Shared_load_f32x4 (a, b, c, d, _, _) -> [a; b; c; d]
@@ -168,7 +169,7 @@ let results = function
 let operands = function
   | Const_bool _ -> []
   | Sub_i32(_,a,b) | Mul_i32(_,a,b) | Compare(_,_,a,b)
-  | Div_i32(_,a,b) | Rem_i32(_,a,b) -> [a;b]
+  | Div_i32(_,a,b) | Rem_i32(_,a,b) | Min_i32(_,a,b) -> [a;b]
   | If(_,c,_,_) | If_uni(_,c,_,_) -> [c]
   | Const_i32 _ | Const_f32 _ | Thread_idx_x _ | Global_idx_x _ | Block_idx_x _ | Block_idx_y _ -> []
   | Gep_f32 (_, p, ix) -> [p; ix]
@@ -238,6 +239,7 @@ let rec map_uses replace = function
   | Mul_f32 (dst,a,b) -> Mul_f32(dst,replace a,replace b)
   | Mad_f32 (dst,a,b,c) -> Mad_f32(replace dst,replace a,replace b,replace c)
   | Div_i32 (dst,a,b) -> Div_i32(dst,replace a,replace b)
+  | Min_i32 (dst,a,b) -> Min_i32(dst,replace a,replace b)
   | Rem_i32 (dst,a,b) -> Rem_i32(dst,replace a,replace b)
   | Gep_f32 (dst,base,index) -> Gep_f32(dst,replace base,replace index)
   | Load_f32 (dst,ptr) -> Load_f32(dst,replace ptr)

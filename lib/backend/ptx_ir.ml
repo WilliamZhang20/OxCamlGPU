@@ -7,6 +7,7 @@ type operation =
   | Sub_i32 of Ir.value * Ir.value * Ir.value
   | Mul_i32 of Ir.value * Ir.value * Ir.value
   | Div_i32 of Ir.value * Ir.value * Ir.value
+  | Min_i32 of Ir.value * Ir.value * Ir.value
   | Rem_i32 of Ir.value * Ir.value * Ir.value
   | Compare of Ir.value * Gpu_type.comparison * Ir.value * Ir.value
   | Label of int
@@ -148,6 +149,7 @@ type kernel = {
 
 let results = function
   | Const_bool(v,_) | Sub_i32(v,_,_) | Mul_i32(v,_,_) | Div_i32(v,_,_) | Rem_i32(v,_,_)
+  | Min_i32(v,_,_)
   | Compare(v,_,_,_) | Move(v,_) | Shared_alloc v -> [v]
   | Label _ | Jump _ | Jump_uni _ | Branch _ | Branch_uni _ -> []
   | Const_i32 (v, _) | Const_f32 (v, _) | Thread_idx_x v | Global_idx_x v
@@ -175,7 +177,7 @@ let results = function
 
 let operands = function
   | Const_bool _ | Label _ | Jump _ | Jump_uni _ -> []
-  | Sub_i32(_,a,b) | Mul_i32(_,a,b) | Div_i32(_,a,b) | Rem_i32(_,a,b)
+  | Sub_i32(_,a,b) | Mul_i32(_,a,b) | Div_i32(_,a,b) | Rem_i32(_,a,b) | Min_i32(_,a,b)
   | Compare(_,_,a,b) -> [a;b]
   | Branch(v,_,_) | Branch_uni(v,_,_) | Move(_,v) -> [v]
   | Const_i32 _ | Const_f32 _ | Thread_idx_x _ | Global_idx_x _ | Block_idx_x _ | Block_idx_y _

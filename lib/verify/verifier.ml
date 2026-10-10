@@ -137,6 +137,7 @@ let verify_kernel k =
     | Thread_idx_x dst | Global_idx_x dst | Block_idx_x dst | Block_idx_y dst ->
         if dst.ty <> I32 then add "E_INDEX_TYPE" "thread and block indices must define i32 values"
     | Add_i32 (dst, a, b) | Sub_i32(dst,a,b) | Mul_i32(dst,a,b)
+    | Min_i32(dst,a,b)
     | Div_i32(dst,a,b) | Rem_i32(dst,a,b) ->
         if dst.ty <> I32 || a.ty <> I32 || b.ty <> I32 then
           add "E_ARITH_TYPE" "i32 arithmetic requires an i32 result and i32 operands"

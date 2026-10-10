@@ -201,6 +201,8 @@ let lower (source : Kernel_ast.t) =
             [Mul_i32 (define d I32, atom loc a, atom loc b)]
         | Kernel_ast.Div_i32 (d, a, b) ->
             [Div_i32 (define d I32, atom loc a, atom loc b)]
+        | Kernel_ast.Min_i32 (d, a, b) ->
+            [Min_i32 (define d I32, atom loc a, atom loc b)]
         | Kernel_ast.Rem_i32 (d, a, b) ->
             [Rem_i32 (define d I32, atom loc a, atom loc b)]
 

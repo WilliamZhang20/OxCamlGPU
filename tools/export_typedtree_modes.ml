@@ -290,6 +290,66 @@ let rec expression s env exp =
                 emit s exp (K.Wgmma_mma_tf32 (ids, da, db, n, scale));
                 Void
             | _ -> fail exp.exp_loc "wgmma_mma_tf32 expects acc, desc_a, desc_b, ~n, ~scale")
+       (* Which warpgroup the calling thread is in. 128 is the warpgroup
+          width, a hardware constant, so the division belongs here. *)
+       | "warpgroup_index" ->
+           (match xs with
+            | [ Nolabel, Typedtree.Arg (u, _) ] ->
+                unit u.exp_loc (expression s env u);
+                let tid =
+                  let d = fresh s in emit s exp (K.Thread_idx_x d); K.Value d
+                in
+                let width = let d = fresh s in emit s exp (K.Const_i32 (d, 128)); K.Value d in
+                let d = fresh s in
+                emit s exp (K.Div_i32 (d, tid, width));
+                Scalar (K.Value d, full_range)
+            | _ -> fail exp.exp_loc "warpgroup_index expects ()")
+       (* Grouped CTA order. Row-major blockIdx makes every tile-row stream
+          the whole of B, so B's DRAM traffic scales with the tile-row count.
+          Walking [group] tile-rows before advancing along N keeps one A
+          row-block resident across a group and cuts B's re-reads by that
+          factor. This is the standard grouped bijection, so every tile is
+          still covered exactly once, including when [tiles_m] is not a
+          multiple of [group] and the last group is short. The group height is
+          the author's tuning choice; the mapping is not. *)
+       | ("grouped_tile_m" | "grouped_tile_n") ->
+           (match labelled exp.exp_loc ~required:["group"; "tiles_m"; "tiles_n"] xs with
+            | [group; tiles_m; tiles_n], unit_arg ->
+                (match unit_arg with
+                 | Some u -> unit u.exp_loc (expression s env u)
+                 | None -> ());
+                let value e = fst (scalar e.exp_loc (expression s env e)) in
+                let group = value group
+                and tiles_m = value tiles_m
+                and tiles_n = value tiles_n in
+                let bin node a b =
+                  let d = fresh s in emit s exp (node d a b); K.Value d
+                in
+                let add a b = bin (fun d x y -> K.Add_i32 (d, x, y)) a b in
+                let sub a b = bin (fun d x y -> K.Sub_i32 (d, x, y)) a b in
+                let mul a b = bin (fun d x y -> K.Mul_i32 (d, x, y)) a b in
+                let div a b = bin (fun d x y -> K.Div_i32 (d, x, y)) a b in
+                let rem a b = bin (fun d x y -> K.Rem_i32 (d, x, y)) a b in
+                let min_ a b = bin (fun d x y -> K.Min_i32 (d, x, y)) a b in
+                let ctaid node =
+                  let d = fresh s in emit s exp (node d); K.Value d
+                in
+                let bx = ctaid (fun d -> K.Block_idx_x d) in
+                let by = ctaid (fun d -> K.Block_idx_y d) in
+                (* Linear tile id, then the group it falls in. *)
+                let pid = add (mul by tiles_n) bx in
+                let per_group = mul group tiles_n in
+                let group_first = mul (div pid per_group) group in
+                let group_rows = min_ (sub tiles_m group_first) group in
+                let value =
+                  if op = "grouped_tile_m" then
+                    add group_first (rem pid group_rows)
+                  else div (rem pid per_group) group_rows
+                in
+                Scalar (value, full_range)
+            | _ ->
+                fail exp.exp_loc
+                  "grouped_tile_m/n expect ~group ~tiles_m ~tiles_n")
        (* Where accumulator register [i] lives inside this warpgroup's
           m64 x N tile. wgmma.m64nNk8 puts lane [l] of warp [w] at
             row = w*16 + l/4 + 8*((i mod 4)/2)
@@ -855,6 +915,7 @@ let elim_unused_consts instrs =
     | K.Fence_proxy_async | K.Wgmma_fence
     | K.Wgmma_commit_group | K.Wgmma_wait_group _ -> ()
     | K.Add_i32 (_, a, b) | K.Sub_i32 (_, a, b) | K.Mul_i32 (_, a, b)
+    | K.Min_i32 (_, a, b)
     | K.Div_i32 (_, a, b) | K.Rem_i32 (_, a, b) | K.Compare (_, _, a, b)
     | K.Add_f32 (_, a, b) | K.Mul_f32 (_, a, b) | K.Shared_load_f32 (_, a, b)
     | K.Store_f32 (a, b) -> atoms [a; b]

@@ -73,6 +73,7 @@ let lower_unchecked kernel =
       | Sub_i32(d,a,b) -> [Ptx_ir.Sub_i32(d,a,b)]
       | Mul_i32(d,a,b) -> [Ptx_ir.Mul_i32(d,a,b)]
       | Div_i32(d,a,b) -> [Ptx_ir.Div_i32(d,a,b)]
+      | Min_i32(d,a,b) -> [Ptx_ir.Min_i32(d,a,b)]
       | Rem_i32(d,a,b) -> [Ptx_ir.Rem_i32(d,a,b)]
       | Reduce_sum_f32 (dst, src) ->
           if not (is_warp_reduction_input src) then
@@ -257,6 +258,7 @@ let lower kernel =
         require (is_pointer ptr.ty) "grid-leader store requires a global f32 buffer";
         require (value.ty = Gpu_type.F32) "grid-leader store value must be f32"
     | Ptx_ir.Const_bool _ | Ptx_ir.Sub_i32 _ | Ptx_ir.Mul_i32 _ | Ptx_ir.Div_i32 _
+    | Ptx_ir.Min_i32 _
     | Ptx_ir.Rem_i32 _ | Ptx_ir.Compare _
     | Ptx_ir.Label _ | Ptx_ir.Branch _ | Ptx_ir.Branch_uni _ | Ptx_ir.Jump _
     | Ptx_ir.Jump_uni _ | Ptx_ir.Move _

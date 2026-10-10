@@ -10,6 +10,11 @@ module Gpu = struct
   external global_idx_x : unit -> int = "gpu_global_idx_x"
   external block_idx_x : unit -> int = "gpu_block_idx_x"
   external block_idx_y : unit -> int = "gpu_block_idx_y"
+  external warpgroup_index : unit -> int = "gpu_warpgroup_index"
+  external grouped_tile_m : group:int -> tiles_m:int -> tiles_n:int -> int
+    = "gpu_grouped_tile_m"
+  external grouped_tile_n : group:int -> tiles_m:int -> tiles_n:int -> int
+    = "gpu_grouped_tile_n"
   external load : float gpu_array @ aliased read -> int -> float = "gpu_load_f32"
   external store : float gpu_array @ aliased read_write -> int -> float -> unit = "gpu_store_f32"
   external load_masked : float gpu_array @ aliased read -> int -> int -> float = "gpu_load_f32_masked"

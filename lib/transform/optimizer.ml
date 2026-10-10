@@ -63,6 +63,7 @@ let pure_key state instruction =
   | Mul_i32 (_, a, b) -> binary "mul" (sorted a b)
   | Sub_i32 (_, a, b) -> binary "sub" (pair a b)
   | Div_i32 (_, a, b) -> binary "div" (pair a b)
+  | Min_i32 (_, a, b) -> binary "min" (sorted a b)
   | Rem_i32 (_, a, b) -> binary "rem" (pair a b)
   | _ -> None
 

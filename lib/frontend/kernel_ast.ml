@@ -39,6 +39,7 @@ type operation =
   | Sub_i32 of int * atom * atom
   | Mul_i32 of int * atom * atom
   | Div_i32 of int * atom * atom
+  | Min_i32 of int * atom * atom
   | Rem_i32 of int * atom * atom
   | Compare of int * comparison * atom * atom
   | If of (int * ty) option * atom * region * region

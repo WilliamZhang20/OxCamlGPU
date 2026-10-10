@@ -13,6 +13,15 @@ module Gpu : sig
   val global_idx_x : unit -> int
   val block_idx_x : unit -> int
   val block_idx_y : unit -> int
+  (** Which warpgroup the calling thread is in. 128 is the warpgroup width. *)
+  val warpgroup_index : unit -> int
+  (** This CTA's tile row and column under a grouped CTA order: [group]
+      tile-rows are walked before advancing along N, so one A row-block stays
+      resident across a group instead of every tile-row re-reading all of B.
+      Covers every tile exactly once, including a short last group. The group
+      height is a tuning choice; the mapping is not. *)
+  val grouped_tile_m : group:int -> tiles_m:int -> tiles_n:int -> int
+  val grouped_tile_n : group:int -> tiles_m:int -> tiles_n:int -> int
 
   val load : float gpu_array @ aliased read -> int -> float
   val store : float gpu_array @ aliased read_write -> int -> float -> unit

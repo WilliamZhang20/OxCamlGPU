@@ -265,6 +265,7 @@ let emit_target (kernel : Ptx_ir.kernel) =
     | Ptx_ir.Sub_i32(d,a,b) -> line (Printf.sprintf "  sub.u32 %s, %s, %s;" (reg d) (reg a) (reg b))
     | Ptx_ir.Mul_i32(d,a,b) -> line (Printf.sprintf "  mul.lo.u32 %s, %s, %s;" (reg d) (reg a) (reg b))
     | Ptx_ir.Div_i32(d,a,b) -> line (Printf.sprintf "  div.u32 %s, %s, %s;" (reg d) (reg a) (reg b))
+    | Ptx_ir.Min_i32(d,a,b) -> line (Printf.sprintf "  min.s32 %s, %s, %s;" (reg d) (reg a) (reg b))
     | Ptx_ir.Rem_i32(d,a,b) -> line (Printf.sprintf "  rem.u32 %s, %s, %s;" (reg d) (reg a) (reg b))
     | Ptx_ir.Compare(d,c,a,b) ->
         let cmp = Gpu_type.string_of_comparison c in

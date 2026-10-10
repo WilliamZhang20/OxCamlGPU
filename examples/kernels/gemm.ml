@@ -27,10 +27,11 @@
      m_dim, n_dim, k : int
        Problem dimensions.
 
-   Three things are load-bearing for performance, each explained where it
-   happens: the grouped CTA order, keeping one WGMMA group in flight, and
-   writing C's row stride so the compiler can prove the epilogue's stores are
-   aligned. docs/gemm-frontend.md collects them.
+   Two things here are load-bearing for performance and easy to undo by
+   accident: keeping one WGMMA group in flight, and writing C's row stride as
+   (N / BN) * BN so the compiler can prove the epilogue's stores are aligned.
+   Both are explained where they happen. A third, the grouped CTA order, is
+   now a compiler call. docs/gemm-frontend.md collects them.
 
    Barriers are one indexed set per direction, so the stage count is a free
    parameter rather than a fixed ladder; that is what makes stages=4
@@ -57,8 +58,6 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m =
     let full = Gpu.mbarrier_set stages_n in
     let empty = Gpu.mbarrier_set stages_n in
     let tid = Int32.of_int (Gpu.thread_idx_x ()) in
-    let bx = Int32.of_int (Gpu.block_idx_x ()) in
-    let by = Int32.of_int (Gpu.block_idx_y ()) in
     let k = Int32.of_int k in
     let bm32 = Int32.of_int bm and bn32 = Int32.of_int bn and bk32 = Int32.of_int bk in
     (* C's row stride. The launch already requires N to be a multiple of BN,
@@ -73,29 +72,21 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m =
     (* Element index of stage s is s * tile_rows * bk. *)
     let a_stride = Int32.of_int (bm * bk) in
     let b_stride = Int32.of_int (bn * bk) in
-    (* Grouped CTA order. In the default row-major order every tile-row
-       streams the whole of B, so B's DRAM traffic scales with the number of
-       tile-rows and gets worse as the problem grows. Walking [group_m]
-       tile-rows before advancing along N lets one A row-block stay resident
-       across a group and cuts B's re-reads by the same factor. The mapping is
-       the standard grouped bijection, so every tile is still covered once. *)
-    let tiles_n = Int32.div n bn32 in
-    let tiles_m = Int32.div (Int32.of_int m_dim) bm32 in
-    let group = Int32.of_int group_m in
-    let pid = Int32.add (Int32.mul by tiles_n) bx in
-    let per_group = Int32.mul group tiles_n in
-    let group_first = Int32.mul (Int32.div pid per_group) group in
-    let group_left = Int32.sub tiles_m group_first in
-    (* The last group is short when tiles_m is not a multiple of the group. *)
-    let group_rows = if group_left < group then group_left else group in
-    let tile_m = Int32.add group_first (Int32.rem pid group_rows) in
-    let tile_n = Int32.div (Int32.rem pid per_group) group_rows in
-    let row_base = Int32.mul tile_m bm32 in
-    let col_base = Int32.mul tile_n bn32 in
+    (* Grouped CTA order, so one A row-block stays resident across [group_m]
+       tile-rows rather than every tile-row re-reading all of B. The group
+       height is the tuning choice here; the compiler owns the mapping. *)
+    let tiles_m = Int32.to_int (Int32.div (Int32.of_int m_dim) bm32) in
+    let tiles_n = Int32.to_int (Int32.div n bn32) in
+    let tile_m = Gpu.grouped_tile_m ~group:group_m ~tiles_m ~tiles_n in
+    let tile_n = Gpu.grouped_tile_n ~group:group_m ~tiles_m ~tiles_n in
+    let row_base = Int32.mul (Int32.of_int tile_m) bm32 in
+    let col_base = Int32.mul (Int32.of_int tile_n) bn32 in
+    (* Warp roles. The split point is this schedule's choice; the warpgroup
+       width behind [warpgroup_index] is the hardware's. *)
     let is_consumer = tid < n_cons in
     let is_producer = tid >= n_cons in
     let is_elect = tid = n_cons in
-    let wg = Int32.div tid 128l in
+    let wg = Int32.of_int (Gpu.warpgroup_index ()) in
     let acc = Gpu.wgmma_acc ~n:bn () in
     for s = 0 to stages_n - 1 do
       Gpu.mbarrier_init_elect (Gpu.mbarrier_slot full s) 1 is_elect;

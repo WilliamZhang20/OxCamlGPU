@@ -233,6 +233,7 @@ let physicalize target =
     | Ptx_ir.Sub_i32 (dst,a,b) -> [Ptx_ir.Sub_i32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Mul_i32 (dst,a,b) -> [Ptx_ir.Mul_i32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Div_i32 (dst,a,b) -> [Ptx_ir.Div_i32 (scalar dst,scalar a,scalar b)]
+    | Ptx_ir.Min_i32 (dst,a,b) -> [Ptx_ir.Min_i32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Rem_i32 (dst,a,b) -> [Ptx_ir.Rem_i32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Compare (dst,c,a,b) -> [Ptx_ir.Compare (scalar dst,c,scalar a,scalar b)]
     | Ptx_ir.Move (dst,src) -> [Ptx_ir.Move (scalar dst,scalar src)]

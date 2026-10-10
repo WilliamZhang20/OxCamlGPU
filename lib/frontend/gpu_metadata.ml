@@ -172,6 +172,7 @@ let encode k =
           | Sub_i32 (d, a, c) -> ["sub_i32"; n d; atom a; atom c]
           | Mul_i32 (d, a, c) -> ["mul_i32"; n d; atom a; atom c]
           | Div_i32 (d, a, c) -> ["div_i32"; n d; atom a; atom c]
+          | Min_i32 (d, a, c) -> ["min_i32"; n d; atom a; atom c]
           | Rem_i32 (d, a, c) -> ["rem_i32"; n d; atom a; atom c]
           | Compare (d, c, a, v) ->
               ["compare"; n d; comparison c; atom a; atom v]
@@ -365,6 +366,8 @@ let parse source =
               Mul_i32 (id d, parse_atom a, parse_atom b)
           | ["body"; "div_i32"; d; a; b] ->
               Div_i32 (id d, parse_atom a, parse_atom b)
+          | ["body"; "min_i32"; d; a; b] ->
+              Min_i32 (id d, parse_atom a, parse_atom b)
           | ["body"; "rem_i32"; d; a; b] ->
               Rem_i32 (id d, parse_atom a, parse_atom b)
           | ["body"; "compare"; d; c; a; b] ->

@@ -113,6 +113,7 @@ let gpu_ops =
   ; "shared"; "shared_wgmma"; "shared_load"; "shared_load_f32x4"; "shared_store"; "shared_store_f32x4"
   ; "barrier_cta"; "cp_async_f32x4"; "cp_async_commit"; "cp_async_wait"; "mad_f32"
   ; "warp_sum_f32"; "store_grid_leader"
+  ; "warpgroup_index"; "grouped_tile_m"; "grouped_tile_n"
   ; "mbarrier"; "mbarrier_set"; "mbarrier_slot"; "mbarrier_init"; "mbarrier_init_elect"
   ; "mbarrier_arrive_expect_tx"; "mbarrier_arrive_expect_tx_elect"
   ; "mbarrier_arrive"; "mbarrier_arrive_elect"; "mbarrier_try_wait_parity"
