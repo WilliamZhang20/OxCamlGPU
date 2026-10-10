@@ -6,6 +6,14 @@ if ! command -v ptxas >/dev/null || ! command -v nvcc >/dev/null; then
   exit 1
 fi
 
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=../../tools/oxcaml-env.sh
+source "$root/tools/oxcaml-env.sh"
+# Refuse to run on a contended GPU.
+# shellcheck source=../../tools/gpu_idle.sh
+source "$root/tools/gpu_idle.sh"
+cd "$root"
+
 metadata_dir="$(mktemp -d)"
 trap 'rm -rf "$metadata_dir"' EXIT
 tools/compile_oxcaml_kernels.sh "$metadata_dir"
@@ -25,5 +33,5 @@ for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch j
 done
 dune exec test/test_control_flow.exe -- --ptx > "$metadata_dir/branch_ir.ptx"
 ptxas -arch=sm_90 "$metadata_dir/branch_ir.ptx" -o "$metadata_dir/branch_ir.cubin"
-nvcc -O2 test/run_h100.cu -lcuda -o /tmp/oxgpu-run-h100
+nvcc -O2 test/hardware/run_h100.cu -lcuda -o /tmp/oxgpu-run-h100
 /tmp/oxgpu-run-h100 /tmp/oxgpu-vector-add.cubin /tmp/oxgpu-saxpy.cubin /tmp/oxgpu-dot-product.cubin /tmp/oxgpu-unique-reuse.cubin /tmp/oxgpu-alias-reuse-aliased.cubin "$metadata_dir"
