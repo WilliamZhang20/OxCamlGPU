@@ -2,5 +2,3 @@ torch
 typing_extensions>=4.12
 # bench/triton_bench.py
 triton
-# bench/cutedsl_bench.py; its Hopper WGMMA path is bf16 only (no TF32 op)
-nvidia-cutlass-dsl
