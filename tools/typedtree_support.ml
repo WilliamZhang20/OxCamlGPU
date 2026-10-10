@@ -128,7 +128,11 @@ let operations =
     ["+."; "*."; "+"; "-"; "*"; "/"; "="; "<>"; "<"; "<="; ">"; ">=";
      "&&"; "||"; "not"] @
   List.map (fun n -> persistent "Stdlib" ["Int32"; n], "i32_" ^ n)
-    ["add"; "sub"; "mul"; "div"; "rem"; "of_int"; "to_int"]
+    ["add"; "sub"; "mul"; "div"; "rem"; "of_int"; "to_int"] @
+  (* Index operators carry i32 semantics while staying OCaml [int], so a
+     kernel needs no conversions at the DSL boundary. *)
+  List.map (fun (n, o) -> persistent "Gpu_dsl" [n], "i32_" ^ o)
+    ["+:", "add"; "-:", "sub"; "*:", "mul"; "/:", "div"; "%:", "rem"]
 
 let primitive exp =
   match exp.exp_desc with

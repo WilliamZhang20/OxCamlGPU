@@ -5,6 +5,16 @@ type gpu_mbarrier = int array
 type tensor_map = int64
 type wgmma_acc = float array
 
+(* 32-bit wrapping index arithmetic, at the top level so an [open Gpu_dsl]
+   makes it infix. Plain [+]/[*] stay range-checked: the adapter proves they
+   fit i32 and refuses when it cannot. These do not ask for a proof, which is
+   what a problem dimension times a row needs. *)
+external ( +: ) : int -> int -> int = "gpu_idx_add"
+external ( -: ) : int -> int -> int = "gpu_idx_sub"
+external ( *: ) : int -> int -> int = "gpu_idx_mul"
+external ( /: ) : int -> int -> int = "gpu_idx_div"
+external ( %: ) : int -> int -> int = "gpu_idx_rem"
+
 module Gpu = struct
   external thread_idx_x : unit -> int = "gpu_thread_idx_x"
   external global_idx_x : unit -> int = "gpu_global_idx_x"

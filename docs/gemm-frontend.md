@@ -105,7 +105,8 @@ which makes `row * stride + col` provably even, which is what lets the store
 vectorizer fuse each accumulator column pair into one 8-byte store. Without
 it the epilogue stays scalar and costs about 8% of the 4096³ runtime.
 
-Authors write plain `Gpu.store` in the epilogue, and ask
+Index math uses the `+:` family rather than `Int32`, so the schedule carries
+no conversions. Authors write plain `Gpu.store` in the epilogue, and ask
 `wgmma_acc_row` / `wgmma_acc_col` where each accumulator register sits.
 Vectorization and the register layout are the backend's job, not the
 kernel's.

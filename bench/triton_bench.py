@@ -14,8 +14,15 @@ def gemm_kernel(
 ):
     # Tiled C = A x B
     pid = tl.program_id(axis=0)
+    num_pid_in_group = 1  # Simplified mapping; can be increased to group PIDs for L2 reuse
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
 
     # compute pointer offsets
+    offs_am = (pid_m * BLOCK_SIZE_M) + 
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     # loop and compute
 

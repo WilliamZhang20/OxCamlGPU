@@ -142,6 +142,11 @@ done
 
 # A small fixture keeps non-kernel examples from carrying adapter-only syntax
 # just to exercise literal lowering.
+# The index operators must reach i32 arithmetic with no range proof.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/idx_ops.cmo" test/fixtures/idx_ops.ml
+"$tmp/export_typedtree_modes" "$tmp/idx_ops.cmt" idx_ops > "$out/idx_ops.gpu"
+
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/literal_probe.cmo" test/fixtures/literal_probe.ml
 "$tmp/export_typedtree_modes" "$tmp/literal_probe.cmt" literal_probe > "$out/literal_probe.gpu"

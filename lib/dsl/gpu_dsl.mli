@@ -8,6 +8,18 @@ type gpu_mbarrier
 type tensor_map
 type wgmma_acc
 
+(** Index arithmetic, 32-bit and wrapping, at the top level so an
+    [open Gpu_dsl] makes it infix. Plain [+] and [*] stay range-checked: the
+    compiler proves the result fits i32 and refuses when it cannot, which is
+    right for [i + 1] on a thread index. It cannot bound a problem dimension
+    times a row, so index math that genuinely is 32-bit asks with these
+    instead of being forced through [Int32] and its conversions. *)
+val ( +: ) : int -> int -> int
+val ( -: ) : int -> int -> int
+val ( *: ) : int -> int -> int
+val ( /: ) : int -> int -> int
+val ( %: ) : int -> int -> int
+
 module Gpu : sig
   val thread_idx_x : unit -> int
   val global_idx_x : unit -> int
