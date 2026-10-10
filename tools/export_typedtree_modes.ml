@@ -22,7 +22,17 @@ and func = {
   env : (Ident.t * binding) list;
 }
 
-type state = { mutable next : int; mutable body : K.instruction list }
+type state = {
+  mutable next : int;
+  mutable body : K.instruction list;
+  (* Inlining depth, so a recursion the base case never folds away fails with
+     a source location instead of running the adapter out of stack. *)
+  mutable depth : int;
+}
+
+(* Matches the constant-loop unroll limit: a recursion driven by compile-time
+   constants is the same thing written differently. *)
+let max_inline_depth = 64
 
 let fresh s = let n = s.next in s.next <- n + 1; n
 let emit s exp op = s.body <- K.instruction ~loc:(span exp.exp_loc) op :: s.body
@@ -150,8 +160,30 @@ let rec expression s env exp =
       | Boolean, "true" -> bool_const s exp true
       | Boolean, "false" -> bool_const s exp false
        | _ -> fail exp.exp_loc "unsupported constructor")
-  | Texp_let (Recursive, _, _) ->
-      fail exp.exp_loc "recursive bindings are unsupported"
+  | Texp_let (Recursive, bindings, body) ->
+      (* A recursive function is fine as long as its base case folds, which it
+         does when the controlling test is a compile-time constant: the
+         conditional below traces only the taken arm, so the inlining
+         terminates. [local_apply] rebinds the callee's own name inside its
+         body, which is what makes the recursive call resolve. *)
+      let env =
+        List.fold_left
+          (fun env binding ->
+            match binding.vb_pat.pat_desc, binding.vb_expr.exp_desc with
+            | Tpat_var { id; _ }, Texp_function { params; body = Tfunction_body fbody; _ } ->
+                (id,
+                 Func
+                   { params = function_params binding.vb_expr.exp_loc params
+                   ; body = fbody
+                   ; env })
+                :: env
+            | Tpat_var _, _ ->
+                fail binding.vb_expr.exp_loc
+                  "a recursive binding must be a function"
+            | _ -> fail binding.vb_pat.pat_loc "unsupported recursive pattern")
+          env bindings
+      in
+      expression s env body
   | Texp_let (Nonrecursive, bindings, body) ->
       let rec bind env = function
         | [] -> expression s env body
@@ -845,7 +877,19 @@ and local_apply s env exp callee xs =
            in
            if !positionals <> [] then
              fail exp.exp_loc "functions must be fully applied";
-           Some (expression s body_env fn.body)
+           (* Rebinding the callee under its own name is what lets a function
+              call itself; a non-recursive one simply never looks it up. *)
+           let body_env = (id, Func fn) :: body_env in
+           if s.depth >= max_inline_depth then
+             fail exp.exp_loc
+               (Printf.sprintf
+                  "call nested deeper than %d; a recursion whose base case is \
+                   not a compile-time constant cannot be inlined"
+                  max_inline_depth);
+           s.depth <- s.depth + 1;
+           let value = expression s body_env fn.body in
+           s.depth <- s.depth - 1;
+           Some value
        | _ -> None)
   | _ -> None
 
@@ -1027,7 +1071,7 @@ let prior_functions target structure =
                   | Tpat_var { id; _ } ->
                       (match binding.vb_expr.exp_desc with
                        | Texp_function _ ->
-                           let scratch = { next = 0; body = [] } in
+                           let scratch = { next = 0; body = []; depth = 0 } in
                            (match expression scratch !env binding.vb_expr with
                             | Func _ as fn -> env := (id, fn) :: !env
                             | _ -> ())
@@ -1107,11 +1151,11 @@ let compile target structure =
             param.fp_param, value)
           params
       in
-      let s = { next = 0; body = [] } in
+      let s = { next = 0; body = []; depth = 0 } in
       unit body.exp_loc (expression s env body);
       finish s
   | _ ->
-      let s = { next = 0; body = [] } in
+      let s = { next = 0; body = []; depth = 0 } in
       let fn =
         match expression s (prior_functions target structure) binding.vb_expr with
         | Func fn -> fn

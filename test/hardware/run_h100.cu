@@ -216,5 +216,44 @@ int main(int argc, char **argv) {
   if (rounded_result!=0.0f) { fprintf(stderr,"f32 contraction changed rounding: %g\n",rounded_result); return 11; }
   CUDA_CHECK(cuModuleUnload(module));
   puts("H100 branches, guarded SAXPY, short circuit, integer wrapping, NaN/signed-zero comparisons passed");
+
+  /* One recursive, higher-order definition serving two reductions. The
+     recursion and the operator are both gone by PTX, so this checks that what
+     the inlining produced is actually the fold it was written as. */
+  {
+    const int blocks = 4, threads = 256, count = blocks * threads;
+    std::vector<float> host(count);
+    for (int i = 0; i < count; i++) host[i] = (float)((i * 37 % 101) - 50) / 7.0f;
+    CUdeviceptr reduce_src, reduce_dst;
+    CUDA_CHECK(cuMemAlloc(&reduce_src, count * sizeof(float)));
+    CUDA_CHECK(cuMemAlloc(&reduce_dst, blocks * sizeof(float)));
+    CUDA_CHECK(cuMemcpyHtoD(reduce_src, host.data(), count * sizeof(float)));
+    for (int which = 0; which < 2; which++) {
+      const char *name = which == 0 ? "block_sum" : "block_max";
+      CUDA_CHECK(cuModuleLoad(&module, (directory + "/" + name + ".cubin").c_str()));
+      CUDA_CHECK(cuModuleGetFunction(&function, module, name));
+      CUDA_CHECK(cuMemsetD32(reduce_dst, 0, blocks));
+      void *reduce_args[] = {&reduce_src, &reduce_dst};
+      CUDA_CHECK(cuLaunchKernel(function, blocks, 1, 1, threads, 1, 1, 0, NULL,
+                                reduce_args, NULL));
+      CUDA_CHECK(cuCtxSynchronize());
+      std::vector<float> got(blocks);
+      CUDA_CHECK(cuMemcpyDtoH(got.data(), reduce_dst, blocks * sizeof(float)));
+      for (int b = 0; b < blocks; b++) {
+        float want = which == 0 ? 0.0f : -1e30f;
+        for (int i = 0; i < threads; i++) {
+          float v = host[b * threads + i];
+          want = which == 0 ? want + v : fmaxf(want, v);
+        }
+        float tolerance = which == 0 ? 1e-2f : 1e-5f;
+        if (fabsf(got[b] - want) > tolerance) {
+          fprintf(stderr, "%s block %d: got %g want %g\n", name, b, got[b], want);
+          return 12;
+        }
+      }
+      CUDA_CHECK(cuModuleUnload(module));
+    }
+    puts("H100 recursive higher-order block reductions passed");
+  }
   return 0;
 }

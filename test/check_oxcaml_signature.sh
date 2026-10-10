@@ -164,6 +164,28 @@ if [[ "$choose_64" != "gemm_bm64_bn256_s2 64 256 32 160" ]]; then
   echo "print-config 64x256 s2: $choose_64" >&2
   exit 1
 fi
+# A recursive tree fold parameterized by its operator must leave no call, no
+# closure and no recursion: eight fold steps for size 256, the operator
+# inlined once per step, and the two reductions differing only in that
+# operator. A regression in inlining shows up here rather than as slower code.
+for kernel in block_sum block_max; do
+  rg -q $'^threads\t256$' "$tmpdir/$kernel.gpu"
+  if [[ $(rg -c '^body\tbarrier_cta$' "$tmpdir/$kernel.gpu") != 9 ]]; then
+    echo "$kernel: expected 8 fold barriers plus the load barrier" >&2
+    exit 1
+  fi
+  run_ptx_emitter "$tmpdir/$kernel.gpu" > "$tmpdir/$kernel.ptx"
+  rg -q '\.shared' "$tmpdir/$kernel.ptx"
+done
+if [[ $(rg -c '^body\tadd_f32\t' "$tmpdir/block_sum.gpu") != 8 ]]; then
+  echo "block_sum: the summing operator should inline once per fold step" >&2
+  exit 1
+fi
+if rg -q '^body\tadd_f32\t' "$tmpdir/block_max.gpu"; then
+  echo "block_max: should carry no addition, only comparisons" >&2
+  exit 1
+fi
+
 # Higher-order use, closures and polymorphism are erased by inlining: twice
 # applied to two different functions leaves two multiplies and two adds, the
 # closure over the formal reads it directly, and the polymorphic identity

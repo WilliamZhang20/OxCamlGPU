@@ -33,6 +33,7 @@ Verified by running the adapter:
 | Polymorphic local function used at several types | works |
 | `\|>` and composition chains | works |
 | Structure-level function as the kernel's specialization | works |
+| Recursive function whose base case folds | works |
 
 The last row is how `examples/kernels/gemm.ml` gets nine tile bindings out of
 one `hopper_gemm`: the binding is a partial application at structure level,
@@ -42,6 +43,53 @@ and `prior_functions` resolves it.
 uses a polymorphic identity. It lowers to two multiplies, two adds and a
 store. The identity leaves nothing behind.
 
+## Recursion
+
+A recursive function is inlined like any other, so it terminates exactly when
+its controlling test folds at compile time. Two pieces of the adapter already
+made that work: a comparison of two compile-time constants folds to a
+`Const_bool`, and `Texp_ifthenelse` on a `Const_bool` traces only the taken
+arm. So a recursion stepped by a constant unrolls and the base case
+disappears, while one stepped by a thread index traces both arms forever.
+
+That is the whole rule, and it is checked. A call nested deeper than 64, the
+same limit constant `for` loops unroll to, fails with the source location and
+says why:
+
+```
+reject_unbounded_recursion.ml:11:45: call nested deeper than 64; a recursion
+whose base case is not a compile-time constant cannot be inlined
+```
+
+[`examples/kernels/block_reduce.ml`](../examples/kernels/block_reduce.ml) is
+the practical form: a block reduction as a recursive tree fold parameterized
+by its combining function.
+
+```ocaml
+let rec fold stride =
+  if stride = 0 then ()
+  else begin
+    if tid < stride then
+      Gpu.shared_store sm tid
+        (combine (Gpu.shared_load sm tid)
+           (Gpu.shared_load sm (tid +: stride)));
+    Gpu.barrier_cta ();
+    fold (stride / 2)
+  end
+```
+
+For size 256 that unrolls into eight steps with the operator inlined once per
+step, and nothing recursive, no call and no closure survive into PTX.
+`block_sum` and `block_max` are the same fold under `(fun a b -> a +. b)` and
+a maximum, and differ in the emitted code only by those eight operations.
+`test/hardware/run_h100.sh` checks both against a CPU reference on an H100,
+and the signature test pins the step count so a regression in inlining fails
+rather than quietly costing performance.
+
+This is the shape worth noticing: log-step algorithms, tree reductions,
+scans, butterflies, are all naturally recursive and all have compile-time
+bounds, so they are exactly the class this handles.
+
 ## What is rejected today, and why
 
 | Construct | Message | Real cause |
@@ -50,7 +98,6 @@ store. The identity leaves nothing behind.
 | `let inc = add 1` | functions must be fully applied | no representation for a partially applied `Func` |
 | Function in a tuple or record | unsupported GPU expression | `binding` has no compound case |
 | `if c then f else g` | functions cannot be branch results | a deliberate guard |
-| `let rec` | unsupported call declaration | recursion is rejected outright |
 | Structure-level helper called inside a direct kernel body | unsupported call declaration | deliberate: a direct kernel is traced with only its formals in scope |
 
 Only the last one is a stated policy decision. Its comment says a user
@@ -62,6 +109,8 @@ usability win here.
 ## Tier 1: more of the same staging
 
 All of this stays inside the existing model. Nothing reaches run time.
+
+Bounded recursion is done, as described above. What remains:
 
 1. **Let direct kernels see structure-level functions.** Pass
    `prior_functions` as the initial environment in the `Texp_function` arm of
@@ -78,10 +127,6 @@ All of this stays inside the existing model. Nothing reaches run time.
    record case) so functions can travel in tuples and be destructured. This
    is what lets a kernel return several values, which is useful well beyond
    functions.
-5. **Bounded recursion.** Inline `let rec` to a compile-time depth limit and
-   fail past it, the way constant `for` loops are already unrolled to 64
-   iterations. Covers structural recursion over a statically known bound.
-
 ## Tier 2: compile-time data structures
 
 Staged metaprogramming, where the data exists only in the compiler. A list of

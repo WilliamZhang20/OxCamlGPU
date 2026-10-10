@@ -105,6 +105,13 @@ done
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/gpu_dsl.cmo" lib/dsl/gpu_dsl.ml
 
+# One recursive, higher-order definition, two reductions.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/block_reduce.cmo" examples/kernels/block_reduce.ml
+for kernel in block_sum block_max; do
+  "$tmp/export_typedtree_modes" "$tmp/block_reduce.cmt" "$kernel" > "$out/$kernel.gpu"
+done
+
 for kernel in saxpy vector_add dot_product; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
@@ -164,7 +171,8 @@ done
 
 # Real Typedtree negative fixtures: reject declaration lookalikes, unsupported
 # native integer ranges, and source constructs not yet implemented.
-for fixture in reject_shadow reject_overflow reject_fake_type reject_loop reject_operator; do
+for fixture in reject_shadow reject_overflow reject_fake_type reject_loop \
+  reject_operator reject_unbounded_recursion; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$fixture.cmo" "test/fixtures/$fixture.ml"
   if "$tmp/export_typedtree_modes" "$tmp/$fixture.cmt" "$fixture" > "$tmp/rejected.gpu" 2> "$tmp/rejected.err"; then
