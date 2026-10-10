@@ -2,6 +2,41 @@
 
 OxCamlGPU turns a supported subset of OxCaml programs into GPU kernels. The compiler checks source types and modes; OxCamlGPU imports those facts, verifies GPU-specific rules, and emits PTX. It does not run the OCaml runtime on the GPU or compile arbitrary OCaml programs.
 
+## Source layout
+
+`lib/` is one library over a directory per stage, in dependency order. The
+graph across the folders is acyclic, and `lib/dune` lists the modules grouped
+the same way.
+
+| Folder | Holds |
+| --- | --- |
+| `base/` | Target-independent types, modes, layouts, source spans |
+| `ir/` | Semantic GPU SSA and its alias analysis |
+| `frontend/` | OxCaml `.gpu` metadata, transported and lowered into IR |
+| `verify/` | Semantic verification, uniformity, launch contracts |
+| `transform/` | IR-to-IR passes |
+| `backend/` | PTX target IR, lowering, register mapping, printer |
+| `compiler.ml` | The driver, at the root as the library's front door |
+| `dsl/` | The author-facing `Gpu` API |
+
+Every module carries an `.mli`, which is the house convention, except the four
+that exist only to define IR datatypes: `ir`, `ptx_ir`, `kernel_ast`, and
+`gpu_type`. Every constructor in those is matched on somewhere downstream, so a
+signature could abstract nothing and would only duplicate the definitions and
+force a second edit for each new opcode. Where a module has internals worth
+hiding the signature stays and earns its place: `store_vector` exports 1 of its
+24 definitions, `optimizer` 1 of 10.
+
+`dsl/gpu_dsl.ml` is OxCaml source carrying mode syntax that ordinary OCaml
+cannot parse. It is deliberately absent from the library's `(modules)` list
+and is compiled only by `tools/compile_oxcaml_kernels.sh`, which also compiles
+the schema modules it shares with the adapter.
+
+Under `test/`, `hardware/` holds the on-device harnesses, which are shell and
+CUDA rather than dune targets. The dune unit tests, the PTX emitters, and the
+OxCaml `fixtures/` stay at the top of `test/`; the fixtures also carry mode
+syntax, so that directory is not swept into the host build.
+
 ## Compilation stages
 
 ```text
@@ -13,6 +48,7 @@ kernel.ml
   → Kernel_frontend.lower
   → semantic GPU IR and verification
   → optimizer
+  → store vectorization
   → target strategy selection
   → physical/register mapping
   → PTX IR and printer
@@ -23,6 +59,7 @@ kernel.ml
 - `Oxcaml_frontend.import` decodes metadata. `Kernel_frontend.lower` creates semantic IR values and calls the verifier.
 - `Verifier` checks types, SSA scope, modes, memory access, layouts, and shared-memory initialization. `Uniformity` rejects collectives reached by insufficiently uniform participation.
 - `Optimizer` currently reuses a prior load only when intervening writes cannot alias it.
+- `Store_vector` fuses consecutive scalar f32 stores into `st.global.v2` / `v4`. It proves two things before fusing: that the element indices are consecutive, using an affine form over structurally keyed atoms, and that the first index is a multiple of the vector width, using a congruence `v = r (mod m)`. Atoms are keyed by structure, so an index subexpression recomputed per store still unifies without a prior CSE pass. Anything it cannot prove stays scalar.
 - `Ptx_lowering` selects and validates PTX-specific strategies. `Physical_ir` maps semantic SSA values to per-participant register tuples and rejects tensors the current PTX backend cannot expand. `Ptx_ir` contains target operations; `Ptx` prints PTX and its launch contract.
 
 The representation boundaries have distinct responsibilities: `Kernel_ast` is the versioned frontend transport format; `Ir` is semantic GPU SSA; `Physical_ir` expands supported tensors into per-participant scalar registers; `Ptx_ir` contains legal target operations. Tensor arithmetic keeps its semantic operation kind in target IR through legality checks.
@@ -31,9 +68,9 @@ The compiler adapter uses compiler APIs and Typedtree structures that are specif
 
 ## Source subset and numeric contract
 
-The adapter accepts simple nonrecursive `let` bindings, sequencing, unit and boolean literals, scalar comparisons, scalar/unit `if`, short-circuit boolean operators, selected standard arithmetic, and the declared `Gpu` operations. It identifies API declarations by compiler identity, so a similarly named user function does not gain GPU meaning. Unsupported syntax reports a source location.
+The adapter accepts simple nonrecursive `let` bindings, fully applied local functions (inlined at the call), sequencing, unit and boolean literals, scalar comparisons, scalar/unit `if`, short-circuit boolean operators, selected standard arithmetic, and the declared `Gpu` operations. A kernel binding may itself be a fully applied call of an earlier structure-level function; the arguments become constants in the inlined body, which is how one GEMM schedule specializes to several tiles. A `for` whose bounds are compile-time constants and whose trip count is at most 64 is unrolled, so an index expression such as `4 * i` can select a register. Constant `Int32` arithmetic folds the same way, with i32 wrap. Constants that folding leaves unused are dropped. Larger or dynamic loops stay `Ir.For`. A branch whose condition is grid-, CTA-, or subgroup-uniform lowers to `bra.uni`, including a warp-aligned `thread_idx` compare (`tid < 256`). A one-lane compare (`tid = 256`) stays divergent. It identifies API declarations by compiler identity, so a similarly named user function does not gain GPU meaning. Unsupported syntax reports a source location.
 
-Current source buffers are dynamic one-dimensional f32 arrays. Supported operations include indices, unmasked or explicitly masked loads/stores, `warp_sum_f32`, and a grid-leader store. Kernels return `unit`. Loops, general helper calls, shaped source tensors, buffer-valued conditionals, and escaping mutable references are unsupported.
+Current source buffers are dynamic one-dimensional f32 arrays. Supported operations include indices, unmasked or explicitly masked loads/stores, `warp_sum_f32`, `block_idx_x` / `block_idx_y`, `Int32.div` / `Int32.rem`, ascending `for` loops, and a grid-leader store. Kernels return `unit`. `[@@gpu.threads N]` on the kernel binding sets `threads_per_cta`. `downto`, recursive helpers, shaped source tensors, buffer-valued conditionals, and escaping mutable references are unsupported.
 
 GPU `float` uses f32 semantics and separate round-to-nearest-even operations. It does not promise host OCaml binary64 behavior. Native `int` uses a signed i32 ABI; ordinary arithmetic is accepted only when interval analysis proves intermediates fit. Explicit `Int32.add/sub/mul` wrap as i32. Callers of raw PTX must provide in-range arguments and launch dimensions. Boolean parameters use a u32 slot, with zero representing false.
 
@@ -43,7 +80,7 @@ The metadata adapter transports uniqueness, locality, OxCaml domain portability,
 
 `Gpu_type` separates logical `Tensor(shape, dtype)` values from addressable `MemRef(shape, dtype, address_space)` storage. Shapes can be static, symbolic, or dynamic. The current source ABI erases buffer shapes to device pointers; extents and strides are not passed. A mask checks nonnegative index and `index < bound`, but the verifier cannot prove that the supplied bound fits the allocation.
 
-`Layout.Register` preserves the original factorized distribution. `Layout.Mapped_register` additionally specifies blocked or interleaved ownership and independent dimension orders for lane, register, and subgroup coordinates. Both expose invertible logical-to-hardware coordinate conversions. The physical IR stores per-participant register slots from this distribution. Multi-register tensor expansion is explicitly rejected by the current PTX backend. `Layout.Shared` describes vector width, order, and optional swizzle. `Layout.Padded_shared` adds explicit row padding to allocation sizing; movement through padded or swizzled shared layouts remains unsupported by the current PTX backend. These layouts describe data distribution and organization; they do not describe value uniformity or physical locality modes. Global MemRefs do not yet carry explicit layouts. Bit-level lane mappings and MMA layouts remain future extensions.
+`Layout.Register` preserves the original factorized distribution. `Layout.Mapped_register` additionally specifies blocked or interleaved ownership and independent dimension orders for lane, register, and subgroup coordinates. Both expose invertible logical-to-hardware coordinate conversions. The physical IR stores per-participant register slots from this distribution. `Layout.Shared` describes vector width, order, and optional swizzle. `Layout.Padded_shared` adds explicit row padding to allocation sizing; movement through padded or swizzled shared layouts remains unsupported by the current PTX backend. `Layout.Global` carries explicit element strides for global MemRefs. These layouts describe data distribution and organization; they do not describe value uniformity or physical locality modes. Bit-level lane mappings and MMA layouts remain future extensions.
 
 Mode facts are also separate from address space:
 
@@ -60,14 +97,90 @@ Mode facts are also separate from address space:
 
 Source conditionals become scoped SSA regions with explicit yields. PTX lowering emits branches and edge moves. Memory operations stay in the selected arm, so loads and stores are not speculated. Uniformity tracks value agreement and active participation separately: CTA barriers require CTA-wide participation, and full-subgroup reductions require all needed lanes to reach the collective. A normal branch join restores the enclosing participation requirement; it is not a memory fence.
 
+## Shared memory
+
+A kernel's shared allocations all live in one window, laid out by ascending
+MemRef id and each started on a 128-byte boundary, which TMA and GMMA
+descriptors require. One declaration then decides placement for the whole
+window.
+
+sm_90 caps a *statically* declared `.shared` array at 48 KiB. The 228 KiB an
+SM actually has is reachable only through the dynamic window, so a window
+over the cap is emitted as `.extern .shared` and the launch must request its
+size. `Compiler.compile` reports that size as `dynamic_shared_bytes`, which is
+0 for a window that fits statically; `emit_matmul_ptx --info FILE.gpu` prints
+it, and the emitted PTX carries it as `// oxgpu.shared.dynamic N` so shell
+harnesses can read it without linking the compiler. A launch that requests too
+little fails at `cuLaunchKernel`, so the number is not optional: the Hopper
+GEMM needs 148112 bytes and cannot run as a static allocation at all.
+
+`Ptx_ir.shared_plan` is the single source of this layout. Both the launch
+contract (`launch.shared_bytes`) and the emitter read it, so the declared size
+and the contract cannot disagree. A window larger than an SM's capacity is
+rejected at lowering.
+
 ## Current backend limits
 
-The PTX backend covers the operations used by current examples and selected direct-IR cases. Elementwise indexing and masked tails can span multiple CTAs. Tensor movement, elementwise scale/multiply, and reductions support 1D f32 tiles distributed across one 32-thread CTA, including multiple values per lane under blocked or interleaved mappings. Physicalization expands each lane’s registers and emits mapping-derived global/shared offsets. Rank-two physicalization, swizzled/padded shared movement, and shaped tensor expressions imported from OxCaml are not yet supported. Reductions sum each lane’s local registers, then use butterfly shuffles across the warp. `Gpu.warp_sum_f32` remains the source-level scalar escape hatch.
+The PTX backend covers the operations used by current examples and selected direct-IR cases. Elementwise indexing and masked tails can span multiple CTAs. Tensor movement, elementwise scale/multiply, and reductions support 1D f32 tiles distributed across one 32-thread CTA, including multiple values per lane under blocked or interleaved mappings. Rank-two f32 tiles are supported for direct-IR movement when lanes own the tile in row-major order: global MemRefs may carry an explicit `Layout.Global` stride layout, and `Load_tensor_masked` / `Store_tensor_masked` predicate row/col bounds. Physicalization expands each lane’s registers and emits mapping-derived global/shared offsets (linear for 1D, div/mod plus row stride for 2D). Swizzled/padded shared movement and shaped tensor expressions imported from OxCaml are not yet supported. Reductions sum each lane’s local registers, then use butterfly shuffles across the warp. `Gpu.warp_sum_f32` remains the source-level scalar escape hatch.
 
-There is no matmul operation, tiled matmul strategy, multi-CTA reduction strategy, or tensor-core lowering. These require both a richer source/IR model and target lowering; adding source syntax alone is insufficient. Shared-memory launch sizing is derived from static shape and dtype; layout-specific padding and swizzle storage requirements are not yet modeled.
+The core `oxgpu` compiler has **no matmul-specific expansion**. It only
+lowers general IR ops authors write (`Shared_*`, `Barrier`, `Tma_load_2d`,
+`Gmma_descriptor`, `Wgmma_mma_tf32`, `Mad_f32`, …).
+
+`oxgpu_matmul` under `examples/matmul/` is only the **tile catalog**: the
+shapes, the size-to-shape choice, and the kernel binding each shape maps to.
+It builds no IR. The schedule is the OxCaml kernel
+[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml).
+`bench/run.sh` emits a specialization (`--print-choose` per size, or
+`MATMUL_BM` / `BN` / `BK` / `STAGES` to pin one). See
+[matmul frontend design](matmul-frontend.md).
+Default tile: BM=128, BN=256, BK=32, stages=3, 288 threads; PTX target `sm_90a`.
 
 ## Validation and benchmarks
 
 `dune runtest` runs host-side verifier, optimizer, frontend, and control-flow checks. OxCaml bridge checks run when a compatible toolchain is configured; otherwise those checks are skipped.
 
-`test/run_h100.sh` exercises generated PTX on a local H100 when CUDA tools are available. `bench/run.sh` compares vector-add and SAXPY against PyTorch operations and compares the 32-element dot product against `torch.dot`. The harness checks results before timing and reports CUDA-event medians. Elementwise benchmarks use a non-multiple extent to exercise masked tails.
+`test/hardware/run_h100.sh` exercises generated PTX on a local H100 when CUDA tools are available. `test/hardware/run_matmul_h100.sh` checks the compiler-emitted tiled TF32 WGMMA GEMM cubin for correctness. `bench/run.sh` compares vector-add and SAXPY against PyTorch operations, the 32-element dot product against `torch.dot`, and matmul at 4096³ / 8192³ against `torch.matmul` (TF32 on) using the Tilus CUDA-event + L2-flush protocol. The harness checks results before timing and reports median latency and TFLOPS. Elementwise benchmarks use a non-multiple extent to exercise masked tails.
+
+Every hardware script sources [`tools/gpu_idle.sh`](../tools/gpu_idle.sh) and
+refuses to run on a contended GPU, because a neighbouring job skews the
+percentage badly.
+
+### Measured GEMM performance
+
+H100 80GB HBM3, TF32 on both sides, CUDA 12.9, `torch.matmul` as the cuBLAS
+reference, on an otherwise idle GPU. `matmul_tiled` at BM=128, BN=256, BK=32,
+stages=3, group_m=16, 288 threads.
+
+One `bench/run.sh` run:
+
+| Problem | oxgpu | cuBLAS | % cuBLAS |
+| --- | --- | --- | --- |
+| 4096³ | 380.4 TFLOPS | 400.9 TFLOPS | 94.9 |
+| 8192³ | 403.0 TFLOPS | 377.9 TFLOPS | 106.7 |
+
+Read the ratios with the spread in mind. 4096³ is stable: across runs this
+kernel lands at 379-381 TFLOPS and cuBLAS at 400-401, so 95% is repeatable.
+8192³ is effectively a tie, and both sides move: over six runs this kernel
+spanned 367-403 TFLOPS and cuBLAS 378-411, which puts the ratio anywhere from
+90% to 107% depending on which end of each range a run lands on. The profiler
+numbers below, taken back to back in one process, are the better evidence that
+8192³ is at parity.
+
+Nsight Compute on the same launches, against the cuBLAS kernel each was timed
+against. cuBLAS independently selects the same 128×256×32 tile with two
+consumer warpgroups.
+
+| Metric | 4096³ oxgpu | 4096³ cuBLAS | 8192³ oxgpu | 8192³ cuBLAS |
+| --- | --- | --- | --- | --- |
+| Duration | 408 us | 408 us | 3.04 ms | 3.07 ms |
+| Compute (SM) throughput | 88.6 % | 88.2 % | 93.6 % | 93.1 % |
+| L2 throughput | 50.3 % | 56.7 % | 60.2 % | 62.9 % |
+| DRAM throughput | 25.6 % | 25.5 % | 26.7 % | 26.0 % |
+
+Both kernels are compute-bound at the same SM throughput, and under the
+profiler the durations match within 1%. The wall-clock gap is launch and clock
+behaviour rather than arithmetic: cuBLAS launches 132 CTAs as one persistent
+wave over the 132 SMs, while this kernel launches a 16×32 or 32×64 grid and
+relies on the grouped CTA order for locality instead. A persistent tile loop
+would close the remaining few percent and needs no new compiler support.

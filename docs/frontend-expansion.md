@@ -62,14 +62,14 @@ locations are absent. Primitive and type recognition rely on textual names.
 
 | File | Planned responsibility/change |
 | --- | --- |
-| `lib/source_span.ml` (new) | Compiler-independent file/start/end positions, plus an explicit synthetic location for manually constructed fixtures. No dependency on OxCaml `Location`. |
-| `lib/mode.ml` → `lib/gpu_mode.ml` | Rename the project mode module to avoid collision with OxCaml compiler-libs' `Mode` when compiling shared schema sources into the adapter. Preserve its semantics. Update imports mechanically. |
-| `lib/kernel_ast.ml` | Own the canonical frontend types: complete signature, typed value definitions/references, supported modal facts, source spans, and body. Remove aliases to codec-owned operation types and redundant argument-kind descriptions. No dependency on backend `Ir`. |
-| `lib/gpu_metadata.ml` | Encode/decode `Kernel_ast.t`; own wire syntax and version validation only. Add a version 3 format with explicit region boundaries, escaped source paths, locations, declared result types, and typed mode fields. The format remains a transport for operations, not a recursive expression language. |
+| `lib/base/source_span.ml` (new) | Compiler-independent file/start/end positions, plus an explicit synthetic location for manually constructed fixtures. No dependency on OxCaml `Location`. |
+| `lib/mode.ml` → `lib/base/gpu_mode.ml` | Rename the project mode module to avoid collision with OxCaml compiler-libs' `Mode` when compiling shared schema sources into the adapter. Preserve its semantics. Update imports mechanically. |
+| `lib/frontend/kernel_ast.ml` | Own the canonical frontend types: complete signature, typed value definitions/references, supported modal facts, source spans, and body. Remove aliases to codec-owned operation types and redundant argument-kind descriptions. No dependency on backend `Ir`. |
+| `lib/frontend/gpu_metadata.ml` | Encode/decode `Kernel_ast.t`; own wire syntax and version validation only. Add a version 3 format with explicit region boundaries, escaped source paths, locations, declared result types, and typed mode fields. The format remains a transport for operations, not a recursive expression language. |
 | `tools/export_typedtree_modes.ml` | Construct the shared AST from resolved Typedtree nodes, then invoke the shared encoder once. Buffer the entire result so failure cannot leave a plausible partial artifact. Convert compiler locations and supported structured mode constants explicitly. |
 | `tools/compile_oxcaml_kernels.sh` | Compile the small shared schema/codec source closure with the pinned OxCaml toolchain in its build directory. Do not link host-built `.cmx` files into the compiler adapter. |
-| `lib/oxcaml_frontend.ml` | Provide one import entry point returning the complete typed frontend kernel from one decode. Stop manufacturing a separate signature from a second parse. |
-| `lib/kernel_frontend.ml` | Consume that complete typed kernel. Validate IDs, argument references, source/kernel identity, types, and supported modes before constructing semantic IR. Resolve operands before publishing their result definition. |
+| `lib/frontend/oxcaml_frontend.ml` | Provide one import entry point returning the complete typed frontend kernel from one decode. Stop manufacturing a separate signature from a second parse. |
+| `lib/frontend/kernel_frontend.ml` | Consume that complete typed kernel. Validate IDs, argument references, source/kernel identity, types, and supported modes before constructing semantic IR. Resolve operands before publishing their result definition. |
 | `lib/dune` | Register the renamed/new modules with the dependency direction `source types → codec → import/lowering`. |
 | `examples/*.ml`, `test/emit_ptx.ml`, `test/check_compiler_metadata.ml` | Use the single import entry point; remove duplicate parsing. |
 
@@ -129,20 +129,20 @@ semantics or a wider ABI need a separate design.
 
 | File | Planned responsibility/change |
 | --- | --- |
-| `lib/gpu_type.ml` | Add internal `Bool`; distinguish supported source numeric kinds in the frontend mapping. Define which types may be branch results. |
-| `lib/kernel_ast.ml` | Add typed comparisons, scalar integer operations, structured conditional regions and yields, carrying source spans. Keep lexical bindings in the adapter environment and explicit values in the AST. |
-| `lib/gpu_metadata.ml` | Encode/decode the structured AST through the shared versioned codec; validate nested region structure rather than flattening both arms into unconditional operations. |
+| `lib/base/gpu_type.ml` | Add internal `Bool`; distinguish supported source numeric kinds in the frontend mapping. Define which types may be branch results. |
+| `lib/frontend/kernel_ast.ml` | Add typed comparisons, scalar integer operations, structured conditional regions and yields, carrying source spans. Keep lexical bindings in the adapter environment and explicit values in the AST. |
+| `lib/frontend/gpu_metadata.ml` | Encode/decode the structured AST through the shared versioned codec; validate nested region structure rather than flattening both arms into unconditional operations. |
 | `tools/export_typedtree_modes.ml` | Visit nested `let`, `if`, unit, boolean and supported operator nodes in expression/effect positions. Recognize short-circuit operators before ordinary call handling. Preserve sequencing and supported evaluation semantics. |
-| `lib/kernel_frontend.ml` | Lower both arms in independent lexical environments; create fresh result definitions and explicit yields. Apply numeric range restrictions and preserve modal/provenance facts. |
-| `lib/ir.ml` | Introduce regions, typed `If`, comparisons, and explicit terminators. Provide region-aware traversal; distinguish immediate operands from nested uses for dominance checks. Keep canonical SSA identities. |
-| `lib/verifier.ml` | Verify nested scopes, operand/result types, yields, terminators and dominance. At joins, definite shared initialization is the intersection of both paths; pending writes are conservatively combined. Neither a store nor a barrier in one arm establishes a fact on the other arm. |
-| `lib/uniformity.ml` (new) | Compute value agreement and region participation from verified SSA. Return analysis keyed by value/region IDs; avoid duplicating untrusted annotations on operands. Model selector dependence at joins. |
-| `lib/optimizer.ml` | Recurse through regions. Initially clear cached-load facts at branch boundaries and joins, and keep substitutions scoped to their arm. Retain current straight-line unique reuse. No speculative loads or cross-arm reuse. |
-| `lib/ptx_ir.ml` | Add predicate comparisons and explicit target blocks, edges and join parameters. Semantic `If` stays out of target IR. Target labels/predicate identifiers must be allocated centrally. |
-| `lib/ptx_lowering.ml` (new) | Move existing target legalization out of the printer. Lower structured branches to target blocks, translating scalar yields into join-edge moves. Check collective participation, recursively validate layouts, and derive launch/shared-memory requirements over every region. |
-| `lib/ptx.ml` | Print target labels, predicates, branches and edge moves. Preserve explicit returns. Keep memory operations inside their selected arms; emit ordinary `bra` initially. |
+| `lib/frontend/kernel_frontend.ml` | Lower both arms in independent lexical environments; create fresh result definitions and explicit yields. Apply numeric range restrictions and preserve modal/provenance facts. |
+| `lib/ir/ir.ml` | Introduce regions, typed `If`, comparisons, and explicit terminators. Provide region-aware traversal; distinguish immediate operands from nested uses for dominance checks. Keep canonical SSA identities. |
+| `lib/verify/verifier.ml` | Verify nested scopes, operand/result types, yields, terminators and dominance. At joins, definite shared initialization is the intersection of both paths; pending writes are conservatively combined. Neither a store nor a barrier in one arm establishes a fact on the other arm. |
+| `lib/verify/uniformity.ml` (new) | Compute value agreement and region participation from verified SSA. Return analysis keyed by value/region IDs; avoid duplicating untrusted annotations on operands. Model selector dependence at joins. |
+| `lib/transform/optimizer.ml` | Recurse through regions. Initially clear cached-load facts at branch boundaries and joins, and keep substitutions scoped to their arm. Retain current straight-line unique reuse. No speculative loads or cross-arm reuse. |
+| `lib/backend/ptx_ir.ml` | Add predicate comparisons and explicit target blocks, edges and join parameters. Semantic `If` stays out of target IR. Target labels/predicate identifiers must be allocated centrally. |
+| `lib/backend/ptx_lowering.ml` (new) | Move existing target legalization out of the printer. Lower structured branches to target blocks, translating scalar yields into join-edge moves. Check collective participation, recursively validate layouts, and derive launch/shared-memory requirements over every region. |
+| `lib/backend/ptx.ml` | Print target labels, predicates, branches and edge moves. Preserve explicit returns. Keep memory operations inside their selected arms; emit ordinary `bra` initially. |
 | `lib/compiler.ml` | Orchestrate import/lowering, semantic verification and uniformity, optimization, re-verification/re-analysis, target legalization, and emission. Derived analyses cannot survive transformations without recomputation. |
-| `lib/gpu_dsl.ml`, `lib/gpu_dsl.mli` | Keep ordinary conditionals/operators out of the GPU API. Add only required explicit numeric conversions/range contracts. No `Gpu.if` or divergence syntax for kernel authors. |
+| `lib/dsl/gpu_dsl.ml`, `lib/dsl/gpu_dsl.mli` | Keep ordinary conditionals/operators out of the GPU API. Add only required explicit numeric conversions/range contracts. No `Gpu.if` or divergence syntax for kernel authors. |
 
 Branch result permission/ownership joins are deliberately avoided initially by
 restricting results to scalars/unit. Argument buffer accesses inside either arm
@@ -200,7 +200,7 @@ Step 2 acceptance:
 5. Typedtree lowering for nested expressions, `if`, and short-circuit operators;
    run the guarded SAXPY fixture through the full pipeline.
 6. Numeric operations and their range rules; update `README.md` with the precise
-   accepted source subset. Extend `test/run_h100.sh` and `test/run_h100.cu` for
+   accepted source subset. Extend `test/hardware/run_h100.sh` and `test/hardware/run_h100.cu` for
    correctness checks using the existing harness, with PyTorch where applicable.
 
 No loop or new reduction primitive is needed to pass these gates. The key result

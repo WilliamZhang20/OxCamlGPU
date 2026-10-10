@@ -1,9 +1,12 @@
 # Loop frontend expansion
 
-Status: follow-up plan only. No loop syntax is enabled by the conditional work.
-The real adapter currently rejects `for`; a negative fixture keeps that boundary
-explicit. The design below uses the implemented `Ir.If`, scoped regions,
-`Uniformity.check`, `Ptx_lowering`, and per-region optimizer caches.
+Status: ascending `for` (`Texp_for`, `Upto`) lowers to `Ir.For`. Constant
+bounds of at most 64 iterations are unrolled in the adapter, and constant
+index arithmetic (native `int` and wrapping `Int32`) is folded so a register
+select such as `wgmma_acc_get` sees a compile-time index. Unused folded
+constants are dropped. `downto` is still rejected
+(`test/fixtures/reject_loop.ml`). `ref` cells are still unsupported; the
+design below for refs is unchanged.
 
 ## Source subset and first useful kernel
 
@@ -58,18 +61,18 @@ which can overflow at the endpoint. Use the analogous rule for `downto`.
 
 | File | Change |
 | --- | --- |
-| `lib/kernel_ast.ml` | Generalize yields/results; add a typed structured loop and explicit carried parameters. Keep source spans. |
-| `lib/gpu_metadata.ml` | Version the changed schema; encode/decode bounds, direction, parameters, initial values and yields with strict arity checks. The adapter and host still share this implementation. |
+| `lib/frontend/kernel_ast.ml` | Generalize yields/results; add a typed structured loop and explicit carried parameters. Keep source spans. |
+| `lib/frontend/gpu_metadata.ml` | Version the changed schema; encode/decode bounds, direction, parameters, initial values and yields with strict arity checks. The adapter and host still share this implementation. |
 | `tools/export_typedtree_modes.ml` | Handle Typedtree `for`. Recognize `ref`, `!`, and `:=` by resolved declaration identity. Represent eligible local scalar cells in the lexical environment and thread updated values through branches/loops. Reject escaping, aliased, heap-stored or buffer-valued cells initially. No general heap allocation is introduced. |
-| `lib/kernel_frontend.ml` | Allocate globally fresh induction/carried/result IDs, lower a separate loop environment, and translate mutable source cells into explicit SSA state. Import extent/range preconditions from checked invocation metadata. |
-| `lib/ir.ml` | Add loop records and generalized region parameters/yields. Distinguish values defined at the loop boundary from nested definitions in traversal APIs. |
-| `lib/verifier.ml` | Check bound/induction types, region parameter and result arity, canonical identities, dominance, no loop-local escape, and modal compatibility of initial/yielded state. Zero-trip loops cannot establish initialization. Use conservative loop memory facts first. |
-| `lib/uniformity.ml` | Compute carried-value agreement to a fixed point. Trip-count agreement and enclosing participation jointly govern collectives. A condition uniform only on the first iteration is insufficient. |
-| `lib/optimizer.ml` | Start with cache invalidation on loop entry/backedge/exit and local optimization of each body. No loop-invariant load motion or cross-iteration reuse until a separate effects/alias proof is implemented. |
-| `lib/ptx_ir.ml` | Generalize edge moves to parallel copies for multiple carried values and join results. Define label/edge invariants explicitly. |
-| `lib/ptx_lowering.ml` | Emit preheader, header, body, latch and exit labels. Initialize carried registers before the header, preserve zero trips, and lower edge copies with cycle-breaking temporaries. Recurse through loops for layout/launch requirements. |
-| `lib/ptx.ml` | Print legalized branches/copies and reserve the extra scratch registers through the existing allocation scheme. No semantic loop cases in the printer. |
-| `lib/gpu_dsl.ml/.mli` | Keep loops and scalar refs as ordinary OxCaml syntax; do not add a kernel-author instruction-list API. Add only memory descriptors/checks genuinely needed by the launch boundary. |
+| `lib/frontend/kernel_frontend.ml` | Allocate globally fresh induction/carried/result IDs, lower a separate loop environment, and translate mutable source cells into explicit SSA state. Import extent/range preconditions from checked invocation metadata. |
+| `lib/ir/ir.ml` | Add loop records and generalized region parameters/yields. Distinguish values defined at the loop boundary from nested definitions in traversal APIs. |
+| `lib/verify/verifier.ml` | Check bound/induction types, region parameter and result arity, canonical identities, dominance, no loop-local escape, and modal compatibility of initial/yielded state. Zero-trip loops cannot establish initialization. Use conservative loop memory facts first. |
+| `lib/verify/uniformity.ml` | Compute carried-value agreement to a fixed point. Trip-count agreement and enclosing participation jointly govern collectives. A condition uniform only on the first iteration is insufficient. |
+| `lib/transform/optimizer.ml` | Start with cache invalidation on loop entry/backedge/exit and local optimization of each body. No loop-invariant load motion or cross-iteration reuse until a separate effects/alias proof is implemented. |
+| `lib/backend/ptx_ir.ml` | Generalize edge moves to parallel copies for multiple carried values and join results. Define label/edge invariants explicitly. |
+| `lib/backend/ptx_lowering.ml` | Emit preheader, header, body, latch and exit labels. Initialize carried registers before the header, preserve zero trips, and lower edge copies with cycle-breaking temporaries. Recurse through loops for layout/launch requirements. |
+| `lib/backend/ptx.ml` | Print legalized branches/copies and reserve the extra scratch registers through the existing allocation scheme. No semantic loop cases in the printer. |
+| `lib/dsl/gpu_dsl.ml/.mli` | Keep loops and scalar refs as ordinary OxCaml syntax; do not add a kernel-author instruction-list API. Add only memory descriptors/checks genuinely needed by the launch boundary. |
 | `test/test_control_flow.ml` | Extend with multiple yields, simultaneous swaps, loop scope/dominance, zero trips, invalid carried modes and iteration-dependent uniformity. |
 | `test/fixtures/`, bridge script | Compile actual OxCaml loops/accumulators; retain negative tests for escaping refs, while loops, recursion and unsupported calls. |
 | H100 harness | Compare empty/single/multiple-iteration loops and rectangular matvec against a reference; validate untouched outputs and tail guards. Add PyTorch matvec comparison for correctness before performance measurements. |
