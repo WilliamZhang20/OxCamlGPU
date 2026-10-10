@@ -4,7 +4,7 @@ open Gpu_mode
 let slot ty = {loc=Source_span.synthetic;ty;ownership=Aliased;locality=Global;domain_portability=Domain_nonportable;gpu_boundary=Boundary_unspecified;permission=Read_only}
 let loc={Source_span.file="a\tquoted\"path.ml";start_line=2;start_col=3;end_line=2;end_col=14}
 let node op=instruction ~loc op
-let kernel body={name="frontend";args=[];result=slot Unit;body}
+let kernel body={name="frontend";args=[];result=slot Unit;body;threads=None}
 let parse_fails source = try ignore(Gpu_metadata.parse source);failwith "invalid metadata accepted" with Gpu_metadata.Parse_error _->()
 let lower_fails k = try ignore(Kernel_frontend.lower k);failwith "invalid frontend accepted" with Source_span.Error _|Verifier.Invalid_kernel _->()
 let () =
@@ -14,6 +14,16 @@ let () =
   let encoded=Gpu_metadata.encode k in
   if Gpu_metadata.parse encoded<>k then failwith "typed source codec failed to round-trip";
   ignore(Kernel_frontend.lower k);
+  let threaded={k with threads=Some 288} in
+  if Gpu_metadata.parse (Gpu_metadata.encode threaded)<>threaded then
+    failwith "threads field failed to round-trip";
+  let lowered=Kernel_frontend.lower threaded in
+  if lowered.threads_per_cta<>Some 288 then
+    failwith "threads metadata did not reach IR";
+  lower_fails {k with threads=Some 0};
+  lower_fails {k with threads=Some 1025};
+  parse_fails "format\t3\nkernel\tx\nthreads\t0\n";
+  parse_fails "format\t3\nkernel\tx\nthreads\tnope\n";
   parse_fails "format\t2\n";
   parse_fails "format\t3\nkernel\tx\narg\t0\tscalar_i32\tunique\taliased\tnonportable\tread\nresult\tunit\taliased\tglobal\tnonportable\tread\n";
   parse_fails (encoded ^ "end\n");

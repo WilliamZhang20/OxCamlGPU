@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/oxcaml-env.sh"
+
 if [[ $# != 1 ]]; then
   echo "usage: compile_oxcaml_kernels.sh OUTPUT_DIR" >&2
   exit 2
@@ -72,10 +75,15 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp tools/export_typedtree_modes.ml "$tmp/export_typedtree_modes.ml"
 cp tools/typedtree_support.ml "$tmp/typedtree_support.ml"
-shared=(gpu_type gpu_mode source_span kernel_ast gpu_metadata)
+# Schema modules shared between the host library and this adapter. Paths are
+# stage-relative under lib/; they are flattened into $tmp, which is also how
+# the library sees them (lib/dune uses include_subdirs unqualified).
+shared=(base/gpu_type base/gpu_mode base/source_span
+  frontend/kernel_ast frontend/gpu_metadata)
 shared_objects=()
-for name in "${shared[@]}"; do
-  cp "lib/$name.ml" "$tmp/$name.ml"
+for path in "${shared[@]}"; do
+  name="${path##*/}"
+  cp "lib/$path.ml" "$tmp/$name.ml"
   "$native_compiler" -I "$stdlib_dir" -I "$tmp" -c "$tmp/$name.ml"
   shared_objects+=("$tmp/$name.cmx")
 done
@@ -89,17 +97,42 @@ done
   "$tmp/typedtree_support.ml" "$tmp/export_typedtree_modes.ml" \
   -ccopt "-L$stdlib_dir" -o "$tmp/export_typedtree_modes"
 
-# The OxCaml-only DSL API lives in lib/ alongside the compiler library. Dune's
-# host OCaml build excludes it because ordinary OCaml cannot parse mode syntax.
+# The OxCaml-only DSL API lives in lib/dsl/ alongside the compiler library.
+# Dune's host OCaml build excludes it because ordinary OCaml cannot parse mode
+# syntax, so this is the only thing that compiles it.
 "$compiler" -nostdlib -I "$stdlib_dir" -bin-annot -c \
-  -o "$tmp/gpu_dsl.cmi" lib/gpu_dsl.mli
+  -o "$tmp/gpu_dsl.cmi" lib/dsl/gpu_dsl.mli
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
-  -o "$tmp/gpu_dsl.cmo" lib/gpu_dsl.ml
+  -o "$tmp/gpu_dsl.cmo" lib/dsl/gpu_dsl.ml
 
 for kernel in saxpy vector_add dot_product; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
   "$tmp/export_typedtree_modes" "$tmp/$kernel.cmt" "$kernel" > "$out/$kernel.gpu"
+done
+
+# A smoke kernel for the shared/barrier/mad path. It is a test fixture rather
+# than an example: nothing demonstrates it, the signature checks assert on it.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/hierarchy_smoke.cmo" test/fixtures/hierarchy_smoke.ml
+"$tmp/export_typedtree_modes" "$tmp/hierarchy_smoke.cmt" hierarchy_smoke \
+  > "$out/hierarchy_smoke.gpu"
+
+# Keep these names in sync with Matmul_config.kernel_binding.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/matmul_tiled.cmo" examples/kernels/matmul_tiled.ml
+for kernel in \
+  matmul_tiled \
+  matmul_bm128_bn256_s2 \
+  matmul_bm128_bn256_s3 \
+  matmul_bm128_bn128_s3 \
+  matmul_bm128_bn128_s2 \
+  matmul_bm64_bn256_s3 \
+  matmul_bm64_bn256_s2 \
+  matmul_bm256_bn128_s3 \
+  matmul_bm256_bn128_s2
+do
+  "$tmp/export_typedtree_modes" "$tmp/matmul_tiled.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
@@ -115,7 +148,7 @@ done
 
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/control_flow.cmo" test/fixtures/control_flow.ml
-for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch joined_reduction divergent_reduction rounding; do
+for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch joined_reduction divergent_reduction rounding indexed_stores; do
   "$tmp/export_typedtree_modes" "$tmp/control_flow.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 

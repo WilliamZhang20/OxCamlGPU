@@ -62,3 +62,10 @@ let divergent_reduction : float gpu_array @ unique write -> unit = fun y ->
 let rounding : float gpu_array @ unique read_write -> float -> unit = fun y a ->
   let value = a *. a +. (-1.0000002384185791015625) in
   Gpu.store y 0 value
+
+(* Constant index loop plus a local function. The adapter unrolls it. *)
+let indexed_stores : float gpu_array @ unique read_write -> unit = fun y ->
+  let put i = Gpu.store y i 1. in
+  for i = 0 to 3 do
+    put i
+  done

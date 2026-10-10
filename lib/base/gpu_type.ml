@@ -1,3 +1,4 @@
+(* GPU IR types: scalars, pointers, tensors, and addressable MemRefs. *)
 type addr_space = Global | Shared | Local
 
 type dtype = Int32 | Float32
@@ -7,11 +8,14 @@ type shape = dim list
 type ty =
   | Bool
   | I32
+  | U64
   | F32
   | Unit
   | Ptr of ty * addr_space
   | Tensor of shape * dtype
   | MemRef of shape * dtype * addr_space
+  (* Opaque Hopper CUtensorMap (128B); passed as a device pointer to the map. *)
+  | Tensor_map
 
 let dtype_storage_bytes = function Int32 | Float32 -> 4
 
@@ -44,6 +48,7 @@ let string_of_dtype = function Int32 -> "i32" | Float32 -> "f32"
 let rec string_of_ty = function
   | Bool -> "bool"
   | I32 -> "i32"
+  | U64 -> "u64"
   | F32 -> "f32"
   | Unit -> "unit"
   | Ptr (t, space) ->
@@ -54,9 +59,16 @@ let rec string_of_ty = function
   | MemRef (shape, dtype, space) ->
       let space = match space with Global -> "global" | Shared -> "shared" | Local -> "local" in
       Printf.sprintf "memref<%s,%s,%s>" (string_of_shape shape) (string_of_dtype dtype) space
+  | Tensor_map -> "tensor_map"
 
 let is_global_f32_memref = function
   | MemRef ([_], Float32, Global) -> true
+  | _ -> false
+
+let is_static_global_f32_tile = function
+  | MemRef (shape, Float32, Global) ->
+      List.length shape <= 2 &&
+      List.for_all (function Static n -> n > 0 | _ -> false) shape
   | _ -> false
 
 let is_global_f32_buffer = function

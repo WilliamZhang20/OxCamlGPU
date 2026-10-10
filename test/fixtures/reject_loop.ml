@@ -1,2 +1,4 @@
 open Gpu_dsl
-let reject_loop (y : float gpu_array) = for i = 0 to 3 do Gpu.store y i 1. done
+(* downto is rejected; ascending for is supported *)
+let reject_loop (y : float gpu_array) =
+  for i = 3 downto 0 do Gpu.store y i 1. done

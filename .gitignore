@@ -1,4 +1,6 @@
 _build/
+.oxcaml-config
+.bench-venv/
 __pycache__/
 *.cmi
 *.cmo

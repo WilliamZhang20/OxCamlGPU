@@ -1,0 +1,9 @@
+; Tile catalog for the author-facing schedule in examples/kernels/matmul_tiled.ml:
+; the shapes, the size-to-shape choice, and the kernel binding each shape maps
+; to. No IR is built here; the compiler lowers the OxCaml kernel.
+
+(library
+ (name oxgpu_matmul)
+ (modules matmul_config)
+ (libraries oxgpu)
+ (wrapped false))

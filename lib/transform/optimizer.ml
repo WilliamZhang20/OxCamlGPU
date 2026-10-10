@@ -78,7 +78,9 @@ let eliminate_redundant_loads kernel =
                state.cached_loads <- (pointer, dst) :: state.cached_loads;
                Some instruction)
       | Store_f32 (pointer, _) | Store_f32_masked (pointer, _, _, _) |
-        Store_f32_grid_leader (pointer, _) | Store_tensor (pointer, _) ->
+        Store_f32x2 (pointer, _, _) | Store_f32x4 (pointer, _, _, _, _) |
+        Store_f32_grid_leader (pointer, _) | Store_tensor (pointer, _) |
+        Store_tensor_masked (pointer, _, _, _) ->
           invalidate_aliasing_stores kernel state pointer;
           Some instruction
       | If (dst, condition, yes, no) ->
@@ -88,6 +90,17 @@ let eliminate_redundant_loads kernel =
             { body; yield }
           in
           Some (If (dst, condition, optimize_branch yes, optimize_branch no))
+      | If_uni (dst, condition, yes, no) ->
+          clear_load_cache state;
+          let optimize_branch (region : Ir.region) =
+            let body, yield = optimize_region region.body region.yield in
+            { body; yield }
+          in
+          Some (If_uni (dst, condition, optimize_branch yes, optimize_branch no))
+      | For (induction, limit, step, loop_body) ->
+          clear_load_cache state;
+          let loop_body, _ = optimize_region loop_body None in
+          Some (For (induction, limit, step, loop_body))
       | Barrier _ ->
           clear_load_cache state;
           Some instruction
