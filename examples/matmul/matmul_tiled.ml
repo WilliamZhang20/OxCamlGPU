@@ -73,7 +73,6 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m ~producers:_ =
     let is_producer = tid >= n_cons in
     let is_elect = tid = n_cons in
     let wg = Int32.div tid 128l in
-    let lane_wg = Int32.rem tid 128l in
     let acc = Gpu.wgmma_acc ~n:bn () in
     for s = 0 to stages_n - 1 do
       Gpu.mbarrier_init_elect (Gpu.mbarrier_slot full s) 1 is_elect;
@@ -160,27 +159,20 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m ~producers:_ =
       release last_stage
     end;
     if is_consumer then begin
-      let wid = Int32.div lane_wg 32l in
-      let lane = Int32.rem lane_wg 32l in
-      let frag_row = Int32.add (Int32.mul wid 16l) (Int32.div lane 4l) in
-      let frag_col = Int32.mul (Int32.rem lane 4l) 2l in
+      (* This warpgroup owns 64 rows of the CTA tile; where each accumulator
+         register sits inside them is the WGMMA layout, which the compiler
+         supplies. Registers 4g and 4g+1 are column-adjacent, so the backend
+         fuses each pair into one 8-byte store. *)
       let row0 = Int32.add row_base (Int32.mul wg 64l) in
-      let row_a = Int32.add row0 frag_row in
-      let row_b = Int32.add row_a 8l in
-      let store row col value =
-        Gpu.store c (Int32.to_int (Int32.add (Int32.mul row n) col)) value
-      in
-      (* BN/8 fragment groups, four accumulator registers each. Each group's
-         two column-adjacent stores are consecutive f32, so the backend fuses
-         them into one 8-byte vector store. *)
       for g = 0 to bn / 8 - 1 do
-        let col0 = Int32.add col_base (Int32.add frag_col (Int32.of_int (8 * g))) in
-        let col1 = Int32.add col0 1l in
-        let base = 4 * g in
-        store row_a col0 (Gpu.wgmma_acc_get acc base);
-        store row_a col1 (Gpu.wgmma_acc_get acc (base + 1));
-        store row_b col0 (Gpu.wgmma_acc_get acc (base + 2));
-        store row_b col1 (Gpu.wgmma_acc_get acc (base + 3))
+        for j = 0 to 3 do
+          let i = 4 * g + j in
+          let row = Int32.add row0 (Int32.of_int (Gpu.wgmma_acc_row acc i)) in
+          let col = Int32.add col_base (Int32.of_int (Gpu.wgmma_acc_col acc i)) in
+          Gpu.store c
+            (Int32.to_int (Int32.add (Int32.mul row n) col))
+            (Gpu.wgmma_acc_get acc i)
+        done
       done
     end
   in

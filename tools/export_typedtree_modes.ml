@@ -290,6 +290,57 @@ let rec expression s env exp =
                 emit s exp (K.Wgmma_mma_tf32 (ids, da, db, n, scale));
                 Void
             | _ -> fail exp.exp_loc "wgmma_mma_tf32 expects acc, desc_a, desc_b, ~n, ~scale")
+       (* Where accumulator register [i] lives inside this warpgroup's
+          m64 x N tile. wgmma.m64nNk8 puts lane [l] of warp [w] at
+            row = w*16 + l/4 + 8*((i mod 4)/2)
+            col = (l mod 4)*2 + (i mod 2) + 8*(i/4)
+          which is hardware layout, not a schedule choice, so the compiler
+          emits it rather than asking an author to rewrite it per kernel.
+          Which 64 rows a warpgroup owns stays with the author. *)
+       | ("wgmma_acc_row" | "wgmma_acc_col") ->
+           let xs = positional exp.exp_loc xs in
+           (match xs with
+            | [acc; idx] ->
+                let ids = wgmma_acc acc.exp_loc (expression s env acc) in
+                (match expression s env idx with
+                 | Scalar (_, Some (lo, hi)) when lo = hi && lo >= 0L &&
+                     Int64.to_int lo < List.length ids ->
+                     let i = Int64.to_int lo in
+                     let konst n =
+                       let d = fresh s in
+                       emit s exp (K.Const_i32 (d, n)); K.Value d
+                     in
+                     let bin node a b =
+                       let d = fresh s in emit s exp (node d a b); K.Value d
+                     in
+                     let rem a b = bin (fun d x y -> K.Rem_i32 (d, x, y)) a b in
+                     let div a b = bin (fun d x y -> K.Div_i32 (d, x, y)) a b in
+                     let mul a b = bin (fun d x y -> K.Mul_i32 (d, x, y)) a b in
+                     let add a b = bin (fun d x y -> K.Add_i32 (d, x, y)) a b in
+                     let tid =
+                       let d = fresh s in emit s exp (K.Thread_idx_x d); K.Value d
+                     in
+                     let lane_wg = rem tid (konst 128) in
+                     let lane = rem lane_wg (konst 32) in
+                     let base, offset =
+                       if op = "wgmma_acc_row" then
+                         ( add (mul (div lane_wg (konst 32)) (konst 16))
+                             (div lane (konst 4))
+                         , 8 * (i mod 4 / 2) )
+                       else
+                         ( mul (rem lane (konst 4)) (konst 2)
+                         , (i mod 2) + 8 * (i / 4) )
+                     in
+                     let value =
+                       if offset = 0 then base else add base (konst offset)
+                     in
+                     Scalar (value, full_range)
+                 | _ ->
+                     fail idx.exp_loc
+                       "accumulator position index must be a constant in range")
+            | _ ->
+                fail exp.exp_loc
+                  "wgmma_acc_row/col expect acc and a constant index")
        | "wgmma_acc_get" ->
            let xs = positional exp.exp_loc xs in
            (match xs with

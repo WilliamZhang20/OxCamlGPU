@@ -1,4 +1,6 @@
-(* Tile shapes for the Hopper TMA+WGMMA GEMM emitter / autotune catalog.
+(* Tile shapes and launch contract for the Hopper TMA+WGMMA GEMM, and the
+   autotune catalog. Every definition here is part of the interface the
+   emitter and the autotune driver use, so there is no signature to narrow.
 
    consumers = 128 × (bm/64) warp groups (WGMMA m64).
    producers = TMA elect warps (multiple of 32; typically 32).
@@ -16,9 +18,8 @@ let warp_groups (c : tile_config) = c.bm / 64
 let consumers (c : tile_config) = 128 * warp_groups c
 let threads (c : tile_config) = consumers c + c.producers
 
-let wgmma_n_ok n = n >= 8 && n <= 256 && n mod 8 = 0
-
 let validate (c : tile_config) =
+  let wgmma_n_ok n = n >= 8 && n <= 256 && n mod 8 = 0 in
   if c.bm mod 64 <> 0 || c.bm < 64 then
     invalid_arg "BM must be a positive multiple of 64 (WGMMA m64)";
   if not (wgmma_n_ok c.bn) then

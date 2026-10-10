@@ -117,7 +117,7 @@ let gpu_ops =
   ; "mbarrier_arrive_expect_tx"; "mbarrier_arrive_expect_tx_elect"
   ; "mbarrier_arrive"; "mbarrier_arrive_elect"; "mbarrier_try_wait_parity"
   ; "tma_load_2d"; "tma_load_2d_elect"; "fence_proxy_async"
-  ; "wgmma_fence"; "wgmma_acc"; "wgmma_acc_get"; "gmma_descriptor"; "wgmma_mma_tf32"
+  ; "wgmma_fence"; "wgmma_acc"; "wgmma_acc_get"; "wgmma_acc_row"; "wgmma_acc_col"; "gmma_descriptor"; "wgmma_mma_tf32"
   ; "wgmma_commit_group"; "wgmma_wait_group"
   ]
 

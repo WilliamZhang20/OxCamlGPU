@@ -24,7 +24,14 @@ Emit an OxCaml specialization with `emit_matmul_ptx --gpu …/NAME.gpu`.
 | Hierarchy | Author knobs (`Gpu.*`) |
 | --- | --- |
 | **Compute** | `thread_idx_*` / `block_idx_*`, `barrier_cta`, elect predicates, WGMMA fence/wait/commit |
-| **Memory** | global load/store (+f32x4), `shared`, shared load/store, `cp_async_*`, TMA, mbarrier, GMMA descriptors |
+| **Memory** | global load/store (+f32x4), `shared`, shared load/store, `cp_async_*`, TMA, indexed mbarrier sets, GMMA descriptors |
+
+What the compiler supplies rather than asks for: the GMMA descriptor's
+leading/stride/layout fields, which follow from the shared tile; the row and
+column of each accumulator register inside a warpgroup's tile, which is the
+WGMMA layout; and vector widths for stores. Those are hardware encodings, not
+schedule choices. Tile sizes, stage depth, warp roles, barrier order, CTA
+order and which rows a warpgroup owns stay with the author.
 
 There is no `Gpu.matmul`, and no IR-builder path either. Schedules are
 ordinary OxCaml using those ops; the Hopper kernel is
@@ -89,8 +96,10 @@ which makes `row * stride + col` provably even, which is what lets the store
 vectorizer fuse each accumulator column pair into one 8-byte store. Without
 it the epilogue stays scalar and costs about 8% of the 4096³ runtime.
 
-Authors write plain `Gpu.store` in the epilogue. The vectorization is the
-backend's job, not the kernel's.
+Authors write plain `Gpu.store` in the epilogue, and ask
+`wgmma_acc_row` / `wgmma_acc_col` where each accumulator register sits.
+Vectorization and the register layout are the backend's job, not the
+kernel's.
 
 **Group the CTA order.** In the default row-major CTA order every tile-row
 streams the whole of B, so B's DRAM traffic scales with the number of
@@ -122,6 +131,6 @@ it needs nothing from the compiler.
 
 - A persistent CTA loop, 132 CTAs over the 132 SMs, which is how cuBLAS
   launches. Worth the last few percent; needs no new compiler support.
-- A deeper barrier ladder would make stages=4 expressible. The ladder is
-  three deep today, which is why stages=2 is strictly dominated rather than a
-  real alternative.
+- The grouped CTA order is still 15 lines of `div`/`rem` in the kernel, and
+  the warp roles are still derived from raw thread arithmetic. Both are
+  candidates for the same treatment the accumulator layout got.

@@ -77,6 +77,12 @@ module Gpu : sig
   val wgmma_acc : n:int -> unit -> wgmma_acc
   (** Read accumulator register [i] (0 .. n/2 - 1). [i] must be a constant. *)
   val wgmma_acc_get : wgmma_acc -> int -> float
+  (** Row and column of accumulator register [i] inside this warpgroup's
+      m64 x n tile, for the calling lane. With [wgmma_acc_get] these let an
+      epilogue walk the accumulator without hand-encoding the WGMMA register
+      layout. Which 64 rows a warpgroup owns is still the author's choice. *)
+  val wgmma_acc_row : wgmma_acc -> int -> int
+  val wgmma_acc_col : wgmma_acc -> int -> int
   (** Shared-memory operand descriptor for [wgmma_mma_tf32], at an element
       offset into a [shared_wgmma] tile. The packed leading/stride/layout
       fields follow from that tile's extents and swizzle, so the compiler

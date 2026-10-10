@@ -581,4 +581,52 @@ let () =
       threads_per_cta=Some 32 }
   in
   expect_stores "interposed load" interposed ~v4:0 ~v2:0 ~scalar:2;
+  (* Pure integer arithmetic is value-numbered, so a repeated computation is
+     emitted once. Compiler-generated expansions depend on this: an
+     accumulator-position query re-derives the lane from the thread id at
+     every call site. *)
+  let repeated =
+    let buffer=make_value ~locality:Global ~permission:Read_write 360
+        (MemRef([Static 64],Float32,Gpu_type.Global)) in
+    let one=make_value 361 F32 in
+    let address id = make_value ~locality:Global ~permission:Read_write id
+        (Ptr (F32, Gpu_type.Global)) in
+    let tid_a=integer 362 and tid_b=integer 363
+    and four_a=integer 364 and four_b=integer 365
+    and ix_a=integer 366 and ix_b=integer 367 in
+    { name="repeated_arithmetic";
+      args=[{name="y";value=buffer}];
+      body=[Const_f32 (one, 1.);
+            Thread_idx_x tid_a; Const_i32 (four_a, 4);
+            Mul_i32 (ix_a, tid_a, four_a);
+            Thread_idx_x tid_b; Const_i32 (four_b, 4);
+            Mul_i32 (ix_b, tid_b, four_b);
+            Gep_f32 (address 370, buffer, ix_a); Store_f32 (address 370, one);
+            Gep_f32 (address 371, buffer, ix_b); Store_f32 (address 371, one)];
+      threads_per_cta=Some 32 }
+  in
+  let repeated_ptx = Compiler.compile_ptx repeated in
+  if count "%tid.x" repeated_ptx <> 1 || count "mul.lo.u32" repeated_ptx <> 1 then
+    failwith (Printf.sprintf
+      "repeated integer arithmetic must be emitted once, got %d tid reads and %d multiplies"
+      (count "%tid.x" repeated_ptx) (count "mul.lo.u32" repeated_ptx));
+  (* Commutative operands in either order share one value number. *)
+  let commuted =
+    let buffer=make_value ~locality:Global ~permission:Read_write 380
+        (MemRef([Static 64],Float32,Gpu_type.Global)) in
+    let one=make_value 381 F32 in
+    let address id = make_value ~locality:Global ~permission:Read_write id
+        (Ptr (F32, Gpu_type.Global)) in
+    let tid=integer 382 and four=integer 383
+    and ix_a=integer 384 and ix_b=integer 385 in
+    { name="commuted_arithmetic";
+      args=[{name="y";value=buffer}];
+      body=[Const_f32 (one, 1.); Thread_idx_x tid; Const_i32 (four, 4);
+            Add_i32 (ix_a, tid, four); Add_i32 (ix_b, four, tid);
+            Gep_f32 (address 390, buffer, ix_a); Store_f32 (address 390, one);
+            Gep_f32 (address 391, buffer, ix_b); Store_f32 (address 391, one)];
+      threads_per_cta=Some 32 }
+  in
+  if count "add.u32" (Compiler.compile_ptx commuted) <> 1 then
+    failwith "commuted integer operands must share one value number";
   print_endline "verifier semantic tests passed"

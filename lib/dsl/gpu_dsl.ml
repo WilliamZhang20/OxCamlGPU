@@ -69,6 +69,8 @@ module Gpu = struct
   external wgmma_fence : unit -> unit = "gpu_wgmma_fence"
   external wgmma_acc : n:int -> unit -> wgmma_acc = "gpu_wgmma_acc"
   external wgmma_acc_get : wgmma_acc -> int -> float = "gpu_wgmma_acc_get"
+  external wgmma_acc_row : wgmma_acc -> int -> int = "gpu_wgmma_acc_row"
+  external wgmma_acc_col : wgmma_acc -> int -> int = "gpu_wgmma_acc_col"
   external gmma_descriptor : float gpu_shared -> int -> int64
     = "gpu_gmma_descriptor"
   external wgmma_mma_tf32 :
