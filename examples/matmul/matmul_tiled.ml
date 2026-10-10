@@ -1,4 +1,5 @@
-(* Hopper TF32 CTA GEMM. 95% of cuBLAS at 4096 cubed, parity at 8192 cubed.
+(* Hopper TF32 CTA GEMM. Mid-90s percent of cuBLAS at 4096 cubed, parity at
+   8192 cubed.
 
    One schedule, specialized at compile time. Shared extents, WGMMA [n], and
    accumulator indexes have to be constants, so each catalog tile is a binding

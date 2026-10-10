@@ -7,15 +7,15 @@ narrow kernel subset. The OxCaml frontend exposes **compute hierarchy**
 (indices, barriers, elect) and **memory hierarchy** (global/shared, vector
 and async copies, TMA/mbarrier, WGMMA descriptors) — not a matmul expand.
 The performant Hopper GEMM schedule is the OxCaml kernel
-[`examples/kernels/matmul_tiled.ml`](examples/kernels/matmul_tiled.ml):
+[`examples/matmul/matmul_tiled.ml`](examples/matmul/matmul_tiled.ml):
 one function of the tile constants, specialized to the catalog bindings.
 There is no IR-builder path; [`examples/matmul/`](examples/matmul/) is only the
 tile catalog. See [matmul frontend design](docs/matmul-frontend.md).
 
-On an H100 that kernel holds a repeatable **95% of cuBLAS** at 4096³ TF32 and
-runs at parity at 8192³. Under Nsight Compute the two durations match within
-1%, at 88.6% and 93.6% SM throughput against cuBLAS's 88.2% and 93.1%, and
-cuBLAS independently picks the same 128×256×32 tile. See
+On an H100 that kernel holds a repeatable **mid-90s percentage of cuBLAS** at
+4096³ TF32 and runs at parity at 8192³. Under Nsight Compute the durations
+match within 1%, at 88.9% and 93.7% SM throughput against cuBLAS's 88.6% and
+93.2%, and cuBLAS independently picks the same 128×256×32 tile. See
 [measured GEMM performance](docs/architecture.md#measured-gemm-performance).
 
 ## How it works
@@ -62,7 +62,7 @@ The checkout must be at the revision in `tools/oxcaml-revision` and built with `
 
 ```sh
 tools/compile_oxcaml_kernels.sh /tmp/oxcamlgpu-metadata
-dune exec examples/saxpy.exe -- /tmp/oxcamlgpu-metadata/saxpy.gpu
+dune exec test/emit_ptx.exe -- /tmp/oxcamlgpu-metadata/saxpy.gpu
 ```
 
 Run the host-side checks with `dune runtest`. CUDA execution and benchmarking instructions are in [the architecture guide](docs/architecture.md#validation-and-benchmarks).

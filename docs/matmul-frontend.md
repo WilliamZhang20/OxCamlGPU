@@ -6,7 +6,7 @@ lowers what you wrote; it does not invent a CTA tile schedule behind your back.
 
 ## Where the performant kernel lives
 
-**[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml)** —
+**[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml)** —
 Hopper TMA producers + WGMMA consumers, software-pipelined K loop, written as
 ordinary OxCaml + `Gpu.*`. `hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m` is the
 schedule.
@@ -28,7 +28,7 @@ Emit an OxCaml specialization with `emit_matmul_ptx --gpu …/NAME.gpu`.
 
 There is no `Gpu.matmul`, and no IR-builder path either. Schedules are
 ordinary OxCaml using those ops; the Hopper kernel is
-[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml) and
+[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml) and
 [`examples/matmul/`](../examples/matmul/) holds only the tile catalog.
 Autotune walks that catalog through the OxCaml specializations.
 
@@ -106,14 +106,14 @@ it needs nothing from the compiler.
 
 1. Ascending OxCaml `for` is in the Typedtree adapter. `ref` is still out
    ([loops.md](loops.md)).
-2. `examples/kernels/matmul_tiled.ml` is the TMA + WGMMA schedule. All eight
+2. `examples/matmul/matmul_tiled.ml` is the TMA + WGMMA schedule. All eight
    catalog specializations assemble for `sm_90a` with no register spills, and
    256³ is checked against a CPU reference on hardware by
    `test/hardware/run_matmul_h100.sh`. The 4096³ and 8192³ bench runs check against
    `torch.matmul` before timing.
 3. `bench/run.sh` and `emit_matmul_ptx --gpu` use those `.gpu` files.
    `--print-choose` picks the specialization, always at stages=3.
-4. A repeatable 95% of cuBLAS at 4096³, and parity at 8192³
+4. A repeatable mid-90s percentage of cuBLAS at 4096³, and parity at 8192³
    ([numbers](architecture.md#measured-gemm-performance)). Under Nsight
    Compute the durations match cuBLAS within 1%, so what is left is launch and
    clock behaviour rather than arithmetic.

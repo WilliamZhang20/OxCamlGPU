@@ -82,7 +82,7 @@ let tile_catalog =
 
 let hopper_f32 = List.hd tile_catalog
 
-(* Names of the OxCaml specializations in examples/kernels/matmul_tiled.ml.
+(* Names of the OxCaml specializations in examples/matmul/matmul_tiled.ml.
    [matmul_tiled] stays the default 128×256 stages=3 entry (H100 harness).
    [choose_config] only asks for stages=3; the stages=2 bindings remain
    reachable through [parse_config] and an autotune sweep. *)

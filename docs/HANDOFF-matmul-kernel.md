@@ -4,7 +4,7 @@ Repo: OxCamlGPU
 Last verified: 2026-10-09 on an H100 80GB HBM3, CUDA 12.9.
 
 The performant Hopper TMA + WGMMA schedule is OxCaml source at
-[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml). It
+[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml). It
 lowers through the Typedtree adapter to `.gpu` metadata, verified IR, then PTX
 (`wgmma.mma_async`, `cp.async.bulk.tensor`, mbarrier, shared wgmma layout).
 Nothing matmul-specific lives under `lib/`; authors schedule hierarchy ops
@@ -21,8 +21,8 @@ read [measured GEMM performance](architecture.md#measured-gemm-performance).
 - All eight catalog specializations assemble for `sm_90a`, no register spills.
 - `test/hardware/run_matmul_h100.sh` checks 256³ against a CPU reference and passes.
 - `dune build @runtest` is green.
-- 4096³ TF32 holds a repeatable 95% of cuBLAS; 8192³ runs at parity. Under
-  Nsight Compute both durations match cuBLAS within 1%.
+- 4096³ TF32 holds a repeatable mid-90s percentage of cuBLAS; 8192³ runs at
+  parity. Under Nsight Compute both durations match cuBLAS within 1%.
 
 ## How to emit the kernel PTX
 
@@ -61,7 +61,7 @@ stage index is dynamic.
 
 | Path | Why |
 | --- | --- |
-| `examples/kernels/matmul_tiled.ml` | The kernel |
+| `examples/matmul/matmul_tiled.ml` | The kernel |
 | `docs/matmul-frontend.md` | Design, launch contract, scheduling idioms |
 | `lib/transform/store_vector.ml` | Why the epilogue vectorizes without being written that way |
 | `lib/backend/ptx_ir.ml` | `shared_plan`: the one shared-window layout |

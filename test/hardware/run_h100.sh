@@ -17,9 +17,9 @@ cd "$root"
 metadata_dir="$(mktemp -d)"
 trap 'rm -rf "$metadata_dir"' EXIT
 tools/compile_oxcaml_kernels.sh "$metadata_dir"
-dune exec examples/vector_add.exe -- "$metadata_dir/vector_add.gpu" > /tmp/oxgpu-vector-add.ptx
-dune exec examples/saxpy.exe -- "$metadata_dir/saxpy.gpu" > /tmp/oxgpu-saxpy.ptx
-dune exec examples/dot_product.exe -- "$metadata_dir/dot_product.gpu" > /tmp/oxgpu-dot-product.ptx
+dune exec test/emit_ptx.exe -- "$metadata_dir/vector_add.gpu" > /tmp/oxgpu-vector-add.ptx
+dune exec test/emit_ptx.exe -- "$metadata_dir/saxpy.gpu" > /tmp/oxgpu-saxpy.ptx
+dune exec test/emit_ptx.exe -- "$metadata_dir/dot_product.gpu" > /tmp/oxgpu-dot-product.ptx
 dune exec test/emit_ptx.exe -- "$metadata_dir/unique_reuse.gpu" > /tmp/oxgpu-unique-reuse.ptx
 dune exec test/emit_ptx.exe -- "$metadata_dir/alias_reuse_aliased.gpu" > /tmp/oxgpu-alias-reuse-aliased.ptx
 ptxas -arch=sm_90 /tmp/oxgpu-vector-add.ptx -o /tmp/oxgpu-vector-add.cubin

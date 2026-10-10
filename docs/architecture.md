@@ -130,7 +130,7 @@ lowers general IR ops authors write (`Shared_*`, `Barrier`, `Tma_load_2d`,
 `oxgpu_matmul` under `examples/matmul/` is only the **tile catalog**: the
 shapes, the size-to-shape choice, and the kernel binding each shape maps to.
 It builds no IR. The schedule is the OxCaml kernel
-[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml).
+[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml).
 `bench/run.sh` emits a specialization (`--print-choose` per size, or
 `MATMUL_BM` / `BN` / `BK` / `STAGES` to pin one). See
 [matmul frontend design](matmul-frontend.md).
@@ -150,22 +150,20 @@ percentage badly.
 
 H100 80GB HBM3, TF32 on both sides, CUDA 12.9, `torch.matmul` as the cuBLAS
 reference, on an otherwise idle GPU. `matmul_tiled` at BM=128, BN=256, BK=32,
-stages=3, group_m=16, 288 threads.
+stages=4, group_m=16, 288 threads.
 
 One `bench/run.sh` run:
 
 | Problem | oxgpu | cuBLAS | % cuBLAS |
 | --- | --- | --- | --- |
-| 4096³ | 380.4 TFLOPS | 400.9 TFLOPS | 94.9 |
-| 8192³ | 403.0 TFLOPS | 377.9 TFLOPS | 106.7 |
+| 4096³ | 384.6 TFLOPS | 398.1 TFLOPS | 96.6 |
+| 8192³ | 395.1 TFLOPS | 400.6 TFLOPS | 98.6 |
 
-Read the ratios with the spread in mind. 4096³ is stable: across runs this
-kernel lands at 379-381 TFLOPS and cuBLAS at 400-401, so 95% is repeatable.
-8192³ is effectively a tie, and both sides move: over six runs this kernel
-spanned 367-403 TFLOPS and cuBLAS 378-411, which puts the ratio anywhere from
-90% to 107% depending on which end of each range a run lands on. The profiler
-numbers below, taken back to back in one process, are the better evidence that
-8192³ is at parity.
+Read those ratios with the spread in mind. 4096³ is stable: this kernel lands
+at 384-391 TFLOPS across runs against cuBLAS's 398-401, so the mid-90s is
+repeatable. 8192³ moves much more on both sides, 368-404 against 366-412, so a
+single run there can read anywhere from 89% to 109%. The profiler numbers
+below, taken back to back in one process, are the better evidence.
 
 Nsight Compute on the same launches, against the cuBLAS kernel each was timed
 against. cuBLAS independently selects the same 128×256×32 tile with two
@@ -173,14 +171,15 @@ consumer warpgroups.
 
 | Metric | 4096³ oxgpu | 4096³ cuBLAS | 8192³ oxgpu | 8192³ cuBLAS |
 | --- | --- | --- | --- | --- |
-| Duration | 408 us | 408 us | 3.04 ms | 3.07 ms |
-| Compute (SM) throughput | 88.6 % | 88.2 % | 93.6 % | 93.1 % |
-| L2 throughput | 50.3 % | 56.7 % | 60.2 % | 62.9 % |
-| DRAM throughput | 25.6 % | 25.5 % | 26.7 % | 26.0 % |
+| Duration | 412 us | 410 us | 3.03 ms | 3.04 ms |
+| Compute (SM) throughput | 88.9 % | 88.6 % | 93.7 % | 93.2 % |
+| L2 throughput | 57.9 % | 55.1 % | 74.6 % | 62.9 % |
+| DRAM throughput | 25.5 % | 25.4 % | 26.8 % | 26.1 % |
 
-Both kernels are compute-bound at the same SM throughput, and under the
-profiler the durations match within 1%. The wall-clock gap is launch and clock
-behaviour rather than arithmetic: cuBLAS launches 132 CTAs as one persistent
-wave over the 132 SMs, while this kernel launches a 16×32 or 32×64 grid and
-relies on the grouped CTA order for locality instead. A persistent tile loop
-would close the remaining few percent and needs no new compiler support.
+Both kernels are compute-bound at the same SM throughput, and the durations
+match within 1% at 4096³ while 8192³ is a tie. The higher L2 throughput is
+this kernel doing more L2 traffic for the same work, which is the cost of
+launching a 16×32 or 32×64 grid and leaning on the grouped CTA order for
+locality; cuBLAS launches 132 CTAs as one persistent wave over the 132 SMs. A
+persistent tile loop is the remaining structural difference and needs no new
+compiler support.

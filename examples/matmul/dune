@@ -1,6 +1,9 @@
-; Tile catalog for the author-facing schedule in examples/kernels/matmul_tiled.ml:
-; the shapes, the size-to-shape choice, and the kernel binding each shape maps
-; to. No IR is built here; the compiler lowers the OxCaml kernel.
+; The GEMM example: the OxCaml kernel, and the tile catalog naming the shapes,
+; the size-to-shape choice, and the binding each shape maps to.
+;
+; matmul_tiled.ml is the kernel. It is OxCaml source with mode syntax that
+; ordinary OCaml cannot parse, so it is absent from (modules) and compiled only
+; by tools/compile_oxcaml_kernels.sh. No IR is built here.
 
 (library
  (name oxgpu_matmul)
