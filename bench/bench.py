@@ -30,7 +30,7 @@ WARMUP = 5
 REPEAT = 30
 COOLDOWN_S = 3.0
 
-# Launch contract of the OxCaml GEMM kernel (examples/matmul/matmul_tiled.ml);
+# Launch contract of the OxCaml GEMM kernel (examples/kernels/matmul_tiled.ml);
 # emit_matmul_ptx --info reports threads and the dynamic shared window.
 # Shared memory is static in the cubin; dynamic shared bytes at launch are 0.
 # Default: bm=128,bn=256,bk=32,stages=3,producers=32 → 256 consumers + 32 TMA

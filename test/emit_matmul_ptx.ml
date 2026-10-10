@@ -7,8 +7,8 @@
      emit_matmul_ptx.exe --print-choose M N K
      emit_matmul_ptx.exe --print-config bm=128,bn=256,bk=32,stages=3,producers=32
 
-   The tile catalog (examples/matmul/) only names shapes and maps them to the
-   kernel bindings; it builds no IR:
+   The tile catalog (matmul_config.ml, a module of this executable) only names
+   shapes and maps them to the kernel bindings; it builds no IR:
      emit_matmul_ptx.exe --list-catalog
 *)
 

@@ -127,10 +127,11 @@ The core `oxgpu` compiler has **no matmul-specific expansion**. It only
 lowers general IR ops authors write (`Shared_*`, `Barrier`, `Tma_load_2d`,
 `Gmma_descriptor`, `Wgmma_mma_tf32`, `Mad_f32`, …).
 
-`oxgpu_matmul` under `examples/matmul/` is only the **tile catalog**: the
-shapes, the size-to-shape choice, and the kernel binding each shape maps to.
-It builds no IR. The schedule is the OxCaml kernel
-[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml).
+The **tile catalog** names the shapes, the size-to-shape choice, and the
+kernel binding each shape maps to. It builds no IR, and its only consumer is
+`test/emit_matmul_ptx.ml`, so it is a module of that executable rather than a
+library. The schedule is the OxCaml kernel
+[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml).
 `bench/run.sh` emits a specialization (`--print-choose` per size, or
 `MATMUL_BM` / `BN` / `BK` / `STAGES` to pin one). See
 [matmul frontend design](matmul-frontend.md).

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Autotune the Hopper tile catalog vs cuBLAS (idle GPU only).
-# Default: OxCaml specializations from examples/matmul/matmul_tiled.ml.
+# Default: OxCaml specializations from examples/kernels/matmul_tiled.ml.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

@@ -18,10 +18,12 @@
  (modules emit_multireg_ptx)
  (libraries oxgpu))
 
+; The tile catalog is only ever used by this emitter, so it is a module of it
+; rather than a library of its own.
 (executable
  (name emit_matmul_ptx)
- (modules emit_matmul_ptx)
- (libraries oxgpu oxgpu_matmul))
+ (modules emit_matmul_ptx matmul_config)
+ (libraries oxgpu))
 
 (rule
  (alias runtest)

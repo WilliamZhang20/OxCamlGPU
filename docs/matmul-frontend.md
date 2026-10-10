@@ -6,7 +6,7 @@ lowers what you wrote; it does not invent a CTA tile schedule behind your back.
 
 ## Where the performant kernel lives
 
-**[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml)** —
+**[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml)** —
 Hopper TMA producers + WGMMA consumers, software-pipelined K loop, written as
 ordinary OxCaml + `Gpu.*`. `hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m` is the
 schedule.
@@ -35,8 +35,8 @@ order and which rows a warpgroup owns stay with the author.
 
 There is no `Gpu.matmul`, and no IR-builder path either. Schedules are
 ordinary OxCaml using those ops; the Hopper kernel is
-[`examples/matmul/matmul_tiled.ml`](../examples/matmul/matmul_tiled.ml) and
-[`examples/matmul/`](../examples/matmul/) holds only the tile catalog.
+[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml),
+beside the other kernels.
 Autotune walks that catalog through the OxCaml specializations.
 
 ## Goal
@@ -55,14 +55,16 @@ shared layout legality) — not a substitute for writing the algorithm.
 | Global f32x4 / TMA | Lower the ops you called |
 | Modes on buffers | Provenance, permissions, noalias at verify/launch |
 
-## Modules under `examples/matmul/`
+## Where the pieces live
 
-| Module | Owns |
+| Path | Owns |
 | --- | --- |
-| `Matmul_config` | Tile shapes, `stages`/`producers`, catalog, `choose_config`, `kernel_binding`, parse |
-| `Matmul_pipeline` | Full/empty mbarrier stage indices and expect_tx bytes |
-| `Matmul_tiled` | **The kernel schedule**: TMA producer elect + WGMMA consumers |
-| `Matmul_strategy` | Stable re-exports for emit/bench |
+| `examples/kernels/matmul_tiled.ml` | **The schedule**: TMA producer elect + WGMMA consumers, and the catalog's bindings as applications of it to constants |
+| `test/matmul_config.ml` | Tile shapes, `stages`/`producers`, catalog, `choose_config`, `kernel_binding`, parse |
+| `test/emit_matmul_ptx.ml` | The emitter: `--gpu`, `--info`, `--print-choose`, `--print-config`, `--list-catalog` |
+
+Every kernel is in `examples/kernels/`, including this one. The catalog is a
+module of the emitter, its only consumer, rather than a library of its own.
 
 Warp specialization: threads `[0, consumers)` run WGMMA (HW-aligned 128-thread
 warpgroups); `[consumers, threads)` issue TMA (`cp.async.bulk.tensor`).
@@ -115,7 +117,7 @@ it needs nothing from the compiler.
 
 1. Ascending OxCaml `for` is in the Typedtree adapter. `ref` is still out
    ([loops.md](loops.md)).
-2. `examples/matmul/matmul_tiled.ml` is the TMA + WGMMA schedule. All eight
+2. `examples/kernels/matmul_tiled.ml` is the TMA + WGMMA schedule. All eight
    catalog specializations assemble for `sm_90a` with no register spills, and
    256³ is checked against a CPU reference on hardware by
    `test/hardware/run_matmul_h100.sh`. The 4096³ and 8192³ bench runs check against

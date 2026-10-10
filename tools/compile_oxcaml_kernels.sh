@@ -120,7 +120,7 @@ done
 
 # Keep these names in sync with Matmul_config.kernel_binding.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
-  -o "$tmp/matmul_tiled.cmo" examples/matmul/matmul_tiled.ml
+  -o "$tmp/matmul_tiled.cmo" examples/kernels/matmul_tiled.ml
 for kernel in \
   matmul_tiled \
   matmul_bm128_bn256_s2 \

@@ -7,10 +7,12 @@ narrow kernel subset. The OxCaml frontend exposes **compute hierarchy**
 (indices, barriers, elect) and **memory hierarchy** (global/shared, vector
 and async copies, TMA/mbarrier, WGMMA descriptors) — not a matmul expand.
 The performant Hopper GEMM schedule is the OxCaml kernel
-[`examples/matmul/matmul_tiled.ml`](examples/matmul/matmul_tiled.ml):
+[`examples/kernels/matmul_tiled.ml`](examples/kernels/matmul_tiled.ml):
 one function of the tile constants, specialized to the catalog bindings.
-There is no IR-builder path; [`examples/matmul/`](examples/matmul/) is only the
-tile catalog. See [matmul frontend design](docs/matmul-frontend.md).
+There is no IR-builder path. Every kernel lives in
+[`examples/kernels/`](examples/kernels/); the tile catalog that maps a problem
+size to one of them is a module of `test/emit_matmul_ptx.ml`. See
+[matmul frontend design](docs/matmul-frontend.md).
 
 On an H100 that kernel holds a repeatable **mid-90s percentage of cuBLAS** at
 4096³ TF32 and runs at parity at 8192³. Under Nsight Compute the durations
