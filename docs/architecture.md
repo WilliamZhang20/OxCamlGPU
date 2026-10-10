@@ -108,7 +108,7 @@ sm_90 caps a *statically* declared `.shared` array at 48 KiB. The 228 KiB an
 SM actually has is reachable only through the dynamic window, so a window
 over the cap is emitted as `.extern .shared` and the launch must request its
 size. `Compiler.compile` reports that size as `dynamic_shared_bytes`, which is
-0 for a window that fits statically; `emit_matmul_ptx --info FILE.gpu` prints
+0 for a window that fits statically; `emit_gemm_ptx --info FILE.gpu` prints
 it, and the emitted PTX carries it as `// oxgpu.shared.dynamic N` so shell
 harnesses can read it without linking the compiler. A launch that requests too
 little fails at `cuLaunchKernel`, so the number is not optional: the Hopper
@@ -129,19 +129,19 @@ lowers general IR ops authors write (`Shared_*`, `Barrier`, `Tma_load_2d`,
 
 The **tile catalog** names the shapes, the size-to-shape choice, and the
 kernel binding each shape maps to. It builds no IR, and its only consumer is
-`test/emit_matmul_ptx.ml`, so it is a module of that executable rather than a
+`test/emit_gemm_ptx.ml`, so it is a module of that executable rather than a
 library. The schedule is the OxCaml kernel
-[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml).
+[`examples/kernels/gemm.ml`](../examples/kernels/gemm.ml).
 `bench/run.sh` emits a specialization (`--print-choose` per size, or
 `MATMUL_BM` / `BN` / `BK` / `STAGES` to pin one). See
-[matmul frontend design](matmul-frontend.md).
+[GEMM frontend design](gemm-frontend.md).
 Default tile: BM=128, BN=256, BK=32, stages=3, 288 threads; PTX target `sm_90a`.
 
 ## Validation and benchmarks
 
 `dune runtest` runs host-side verifier, optimizer, frontend, and control-flow checks. OxCaml bridge checks run when a compatible toolchain is configured; otherwise those checks are skipped.
 
-`test/hardware/run_h100.sh` exercises generated PTX on a local H100 when CUDA tools are available. `test/hardware/run_matmul_h100.sh` checks the compiler-emitted tiled TF32 WGMMA GEMM cubin for correctness. `bench/run.sh` compares vector-add and SAXPY against PyTorch operations, the 32-element dot product against `torch.dot`, and matmul at 4096³ / 8192³ against `torch.matmul` (TF32 on) using the Tilus CUDA-event + L2-flush protocol. The harness checks results before timing and reports median latency and TFLOPS. Elementwise benchmarks use a non-multiple extent to exercise masked tails.
+`test/hardware/run_h100.sh` exercises generated PTX on a local H100 when CUDA tools are available. `test/hardware/run_gemm_h100.sh` checks the compiler-emitted tiled TF32 WGMMA GEMM cubin for correctness. `bench/run.sh` compares vector-add and SAXPY against PyTorch operations, the 32-element dot product against `torch.dot`, and matmul at 4096³ / 8192³ against `torch.matmul` (TF32 on) using the Tilus CUDA-event + L2-flush protocol. The harness checks results before timing and reports median latency and TFLOPS. Elementwise benchmarks use a non-multiple extent to exercise masked tails.
 
 Every hardware script sources [`tools/gpu_idle.sh`](../tools/gpu_idle.sh) and
 refuses to run on a contended GPU, because a neighbouring job skews the
@@ -150,7 +150,7 @@ percentage badly.
 ### Measured GEMM performance
 
 H100 80GB HBM3, TF32 on both sides, CUDA 12.9, `torch.matmul` as the cuBLAS
-reference, on an otherwise idle GPU. `matmul_tiled` at BM=128, BN=256, BK=32,
+reference, on an otherwise idle GPU. `gemm_fast` at BM=128, BN=256, BK=32,
 stages=4, group_m=16, 288 threads.
 
 One `bench/run.sh` run:

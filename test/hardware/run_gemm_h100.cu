@@ -44,7 +44,7 @@ static CUtensorMap encode_tiled_2d(
 int main(int argc, char **argv) {
   if (argc != 3) {
     fprintf(stderr, "usage: %s MATMUL.cubin DYNAMIC_SMEM_BYTES\n", argv[0]);
-    fprintf(stderr, "  emit_matmul_ptx --info FILE.gpu reports the byte count\n");
+    fprintf(stderr, "  emit_gemm_ptx --info FILE.gpu reports the byte count\n");
     return 2;
   }
   check(cuInit(0), "cuInit");
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
   CUmodule module;
   check(cuModuleLoad(&module, argv[1]), "cuModuleLoad");
   CUfunction fn;
-  check(cuModuleGetFunction(&fn, module, "matmul_tiled"), "cuModuleGetFunction");
+  check(cuModuleGetFunction(&fn, module, "gemm_fast"), "cuModuleGetFunction");
 
   /* Launch contract: hopper_f32 — 128x256x32, stages=3,
      consumers [0,256) + producers [256,288); elect tid=256 for TMA.
@@ -130,6 +130,6 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  printf("H100 matmul_tiled TMA+WGMMA TF32 %dx%dx%d passed\n", M, N, K);
+  printf("H100 gemm_fast TMA+WGMMA TF32 %dx%dx%d passed\n", M, N, K);
   return 0;
 }

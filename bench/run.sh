@@ -43,7 +43,7 @@ ptxas -arch=sm_90 "$temp_dir/dot_product.ptx" -o "$temp_dir/dot_product.cubin"
   "$temp_dir/dot_product.cubin" "$@"
 
 # Tiled GEMM vs cuBLAS TF32 at 4096³ and 8192³.
-# choose_config picks matmul_tiled (128x256, stages=4) at both sizes. Set
+# choose_config picks gemm_fast (128x256, stages=4) at both sizes. Set
 # MATMUL_BM/BN/BK/STAGES/THREADS to pin one tile for both sizes.
 bench_args=("$@")
 # The emitter records the dynamic shared window in the PTX, so any harness can
@@ -66,13 +66,13 @@ run_matmul_bench () {
 }
 emit_oxcaml_tile () {
   local name="$1"
-  (cd "$root" && dune exec test/emit_matmul_ptx.exe -- --gpu "$metadata_dir/$name.gpu") \
+  (cd "$root" && dune exec test/emit_gemm_ptx.exe -- --gpu "$metadata_dir/$name.gpu") \
     > "$temp_dir/$name.ptx"
   ptxas -arch=sm_90a "$temp_dir/$name.ptx" -o "$temp_dir/$name.cubin"
 }
 if [[ -n "${MATMUL_BM:-}${MATMUL_BN:-}${MATMUL_BK:-}${MATMUL_STAGES:-}${MATMUL_THREADS:-}" ]]; then
   spec="bm=${MATMUL_BM:-128},bn=${MATMUL_BN:-256},bk=${MATMUL_BK:-32},stages=${MATMUL_STAGES:-4},producers=32"
-  read -r name bm bn bk threads < <(cd "$root" && dune exec test/emit_matmul_ptx.exe -- --print-config "$spec")
+  read -r name bm bn bk threads < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- --print-config "$spec")
   if [[ -n "${MATMUL_THREADS:-}" && "$MATMUL_THREADS" != "$threads" ]]; then
     echo "MATMUL_THREADS=$MATMUL_THREADS does not match $name ($threads threads)." >&2
     exit 1
@@ -84,7 +84,7 @@ if [[ -n "${MATMUL_BM:-}${MATMUL_BN:-}${MATMUL_BK:-}${MATMUL_STAGES:-}${MATMUL_T
   done
 else
   for size in 4096 8192; do
-    read -r name bm bn bk threads < <(cd "$root" && dune exec test/emit_matmul_ptx.exe -- --print-choose "$size" "$size" "$size")
+    read -r name bm bn bk threads < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- --print-choose "$size" "$size" "$size")
     if [[ ! -f "$temp_dir/$name.cubin" ]]; then
       emit_oxcaml_tile "$name"
     fi

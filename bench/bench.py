@@ -30,8 +30,8 @@ WARMUP = 5
 REPEAT = 30
 COOLDOWN_S = 3.0
 
-# Launch contract of the OxCaml GEMM kernel (examples/kernels/matmul_tiled.ml);
-# emit_matmul_ptx --info reports threads and the dynamic shared window.
+# Launch contract of the OxCaml GEMM kernel (examples/kernels/gemm.ml);
+# emit_gemm_ptx --info reports threads and the dynamic shared window.
 # Shared memory is static in the cubin; dynamic shared bytes at launch are 0.
 # Default: bm=128,bn=256,bk=32,stages=3,producers=32 → 256 consumers + 32 TMA
 # (consumers occupy tid [0,256); producers [256,288)).
@@ -39,7 +39,7 @@ MATMUL_BM = 128
 MATMUL_BN = 256
 MATMUL_BK = 32
 MATMUL_THREADS = 288
-# Dynamic shared memory is a compiled fact: emit_matmul_ptx --info reports it.
+# Dynamic shared memory is a compiled fact: emit_gemm_ptx --info reports it.
 MATMUL_SMEM = 0
 CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8
 
@@ -304,8 +304,8 @@ def main():
     parser.add_argument("saxpy_cubin", nargs="?", default=None)
     parser.add_argument("dot_product_cubin", nargs="?", default=None)
     parser.add_argument("--matmul-cubin", default=None,
-                        help="Optional OxGPU matmul cubin (entry matmul_tiled)")
-    parser.add_argument("--matmul-name", default="matmul_tiled",
+                        help="Optional OxGPU matmul cubin (entry gemm_fast)")
+    parser.add_argument("--matmul-name", default="gemm_fast",
                         help="Matmul kernel symbol inside the cubin")
     parser.add_argument("--matmul-sizes", nargs="+", type=int, default=[4096, 8192],
                         help="Cube problem sizes to bench (default: 4096 8192)")
@@ -318,7 +318,7 @@ def main():
     parser.add_argument("--matmul-threads", type=int, default=MATMUL_THREADS)
     parser.add_argument("--matmul-smem", type=int, default=MATMUL_SMEM,
                         help="Dynamic shared memory bytes the kernel needs "
-                             "(emit_matmul_ptx --info)")
+                             "(emit_gemm_ptx --info)")
     parser.add_argument("--skip-micro", action="store_true",
                         help="Skip vector_add/saxpy/dot microbenchmarks")
     parser.add_argument("--warmup", type=int, default=WARMUP)

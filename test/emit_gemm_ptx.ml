@@ -2,14 +2,14 @@
 
    Preferred (CTA width comes from [@@gpu.threads] on the kernel):
      tools/compile_oxcaml_kernels.sh OUT
-     emit_matmul_ptx.exe --gpu OUT/matmul_tiled.gpu
-     emit_matmul_ptx.exe --info OUT/matmul_tiled.gpu
-     emit_matmul_ptx.exe --print-choose M N K
-     emit_matmul_ptx.exe --print-config bm=128,bn=256,bk=32,stages=3,producers=32
+     emit_gemm_ptx.exe --gpu OUT/gemm_fast.gpu
+     emit_gemm_ptx.exe --info OUT/gemm_fast.gpu
+     emit_gemm_ptx.exe --print-choose M N K
+     emit_gemm_ptx.exe --print-config bm=128,bn=256,bk=32,stages=3,producers=32
 
-   The tile catalog (matmul_config.ml, a module of this executable) only names
+   The tile catalog (gemm_catalog.ml, a module of this executable) only names
    shapes and maps them to the kernel bindings; it builds no IR:
-     emit_matmul_ptx.exe --list-catalog
+     emit_gemm_ptx.exe --list-catalog
 *)
 
 let read_file path =
@@ -31,7 +31,7 @@ let () =
   match args with
   | ["--gpu"; path] ->
       let threads, compiled = compile_gpu path in
-      Printf.eprintf "emit_matmul (OxCaml): threads=%d dynamic_smem=%d\n%!"
+      Printf.eprintf "emit_gemm (OxCaml): threads=%d dynamic_smem=%d\n%!"
         threads compiled.Compiler.dynamic_shared_bytes;
       print_string compiled.Compiler.ptx
   (* Launch facts a caller cannot read off the PTX: CTA width and the dynamic
@@ -42,28 +42,28 @@ let () =
         compiled.Compiler.dynamic_shared_bytes compiled.Compiler.shared_bytes
   | ["--print-choose"; m; n; k] ->
       let config =
-        Matmul_config.choose_config
+        Gemm_catalog.choose_config
           ~m:(int_of_string m) ~n:(int_of_string n) ~k:(int_of_string k) ()
       in
       Printf.printf "%s %d %d %d %d\n"
-        (Matmul_config.kernel_binding config)
+        (Gemm_catalog.kernel_binding config)
         config.bm config.bn config.bk
-        (Matmul_config.threads config)
+        (Gemm_catalog.threads config)
   | ["--print-config"; spec] ->
-      let config = Matmul_config.parse_config spec in
+      let config = Gemm_catalog.parse_config spec in
       Printf.printf "%s %d %d %d %d\n"
-        (Matmul_config.kernel_binding config)
+        (Gemm_catalog.kernel_binding config)
         config.bm config.bn config.bk
-        (Matmul_config.threads config)
+        (Gemm_catalog.threads config)
   | ["--list-catalog"] ->
       List.iter
-        (fun c -> print_endline (Matmul_config.string_of_config c))
-        Matmul_config.tile_catalog
+        (fun c -> print_endline (Gemm_catalog.string_of_config c))
+        Gemm_catalog.tile_catalog
   | _ ->
       prerr_endline
-        "usage: emit_matmul_ptx.exe --gpu FILE.gpu\n       \
-         emit_matmul_ptx.exe --info FILE.gpu\n       \
-         emit_matmul_ptx.exe --print-choose M N K\n       \
-         emit_matmul_ptx.exe --print-config KEY=VAL,...\n       \
-         emit_matmul_ptx.exe --list-catalog";
+        "usage: emit_gemm_ptx.exe --gpu FILE.gpu\n       \
+         emit_gemm_ptx.exe --info FILE.gpu\n       \
+         emit_gemm_ptx.exe --print-choose M N K\n       \
+         emit_gemm_ptx.exe --print-config KEY=VAL,...\n       \
+         emit_gemm_ptx.exe --list-catalog";
       exit 2

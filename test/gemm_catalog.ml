@@ -83,21 +83,21 @@ let tile_catalog =
 
 let hopper_f32 = List.hd tile_catalog
 
-(* Names of the OxCaml specializations in examples/kernels/matmul_tiled.ml.
-   [matmul_tiled] stays the default 128×256 stages=3 entry (H100 harness).
+(* Names of the OxCaml specializations in examples/kernels/gemm.ml.
+   [gemm_fast] stays the default 128×256 stages=3 entry (H100 harness).
    [choose_config] only asks for stages=3; the stages=2 bindings remain
    reachable through [parse_config] and an autotune sweep. *)
 let kernel_binding (c : tile_config) =
   match c.bm, c.bn, c.bk, c.stages, c.producers with
-  | 128, 256, 32, 4, 32 -> "matmul_tiled"
-  | 128, 256, 32, 3, 32 -> "matmul_bm128_bn256_s3"
-  | 128, 256, 32, 2, 32 -> "matmul_bm128_bn256_s2"
-  | 128, 128, 32, 3, 32 -> "matmul_bm128_bn128_s3"
-  | 128, 128, 32, 2, 32 -> "matmul_bm128_bn128_s2"
-  | 64, 256, 32, 3, 32 -> "matmul_bm64_bn256_s3"
-  | 64, 256, 32, 2, 32 -> "matmul_bm64_bn256_s2"
-  | 256, 128, 32, 3, 32 -> "matmul_bm256_bn128_s3"
-  | 256, 128, 32, 2, 32 -> "matmul_bm256_bn128_s2"
+  | 128, 256, 32, 4, 32 -> "gemm_fast"
+  | 128, 256, 32, 3, 32 -> "gemm_bm128_bn256_s3"
+  | 128, 256, 32, 2, 32 -> "gemm_bm128_bn256_s2"
+  | 128, 128, 32, 3, 32 -> "gemm_bm128_bn128_s3"
+  | 128, 128, 32, 2, 32 -> "gemm_bm128_bn128_s2"
+  | 64, 256, 32, 3, 32 -> "gemm_bm64_bn256_s3"
+  | 64, 256, 32, 2, 32 -> "gemm_bm64_bn256_s2"
+  | 256, 128, 32, 3, 32 -> "gemm_bm256_bn128_s3"
+  | 256, 128, 32, 2, 32 -> "gemm_bm256_bn128_s2"
   | _ -> invalid_arg ("no OxCaml kernel for " ^ string_of_config c)
 
 let choose_config ?(m = 4096) ?(n = 4096) ?k:(_k = 4096) () =

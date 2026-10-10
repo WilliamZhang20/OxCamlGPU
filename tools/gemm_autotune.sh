@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Autotune the Hopper tile catalog vs cuBLAS (idle GPU only).
-# Default: OxCaml specializations from examples/kernels/matmul_tiled.ml.
+# Default: OxCaml specializations from examples/kernels/gemm.ml.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,7 +27,7 @@ fi
 temp="$(mktemp -d)"
 trap 'rm -rf "$temp"' EXIT
 
-echo "matmul_autotune: problem ${M}x${N}x${K} on GPU ${CUDA_VISIBLE_DEVICES}" >&2
+echo "gemm_autotune: problem ${M}x${N}x${K} on GPU ${CUDA_VISIBLE_DEVICES}" >&2
 
 best_tf=0
 best_cfg=""
@@ -38,9 +38,9 @@ best_pct=0
 while IFS= read -r cfg; do
   [[ -z "$cfg" ]] && continue
   echo "--- trying $cfg" >&2
-  read -r name bm bn _bk threads < <(cd "$root" && dune exec test/emit_matmul_ptx.exe -- --print-config "$cfg") \
+  read -r name bm bn _bk threads < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- --print-config "$cfg") \
     || { echo "no OxCaml kernel for $cfg" >&2; continue; }
-  (cd "$root" && dune exec test/emit_matmul_ptx.exe -- --gpu "$temp/metadata/$name.gpu") \
+  (cd "$root" && dune exec test/emit_gemm_ptx.exe -- --gpu "$temp/metadata/$name.gpu") \
     >"$temp/matmul.ptx" 2>"$temp/emit.err" || {
       echo "emit failed for $cfg ($name)" >&2
       cat "$temp/emit.err" >&2
@@ -84,7 +84,7 @@ while IFS= read -r cfg; do
     best_cfg=$cfg
     best_pct=$pct
   fi
-done < <(cd "$root" && dune exec test/emit_matmul_ptx.exe -- --list-catalog)
+done < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- --list-catalog)
 
 echo "BEST $best_cfg  TFLOPS=$best_tf  %cuBLAS=$best_pct" >&2
 echo "$best_cfg"

@@ -118,21 +118,21 @@ done
 "$tmp/export_typedtree_modes" "$tmp/hierarchy_smoke.cmt" hierarchy_smoke \
   > "$out/hierarchy_smoke.gpu"
 
-# Keep these names in sync with Matmul_config.kernel_binding.
+# Keep these names in sync with Gemm_catalog.kernel_binding.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
-  -o "$tmp/matmul_tiled.cmo" examples/kernels/matmul_tiled.ml
+  -o "$tmp/gemm_fast.cmo" examples/kernels/gemm.ml
 for kernel in \
-  matmul_tiled \
-  matmul_bm128_bn256_s2 \
-  matmul_bm128_bn256_s3 \
-  matmul_bm128_bn128_s3 \
-  matmul_bm128_bn128_s2 \
-  matmul_bm64_bn256_s3 \
-  matmul_bm64_bn256_s2 \
-  matmul_bm256_bn128_s3 \
-  matmul_bm256_bn128_s2
+  gemm_fast \
+  gemm_bm128_bn256_s2 \
+  gemm_bm128_bn256_s3 \
+  gemm_bm128_bn128_s3 \
+  gemm_bm128_bn128_s2 \
+  gemm_bm64_bn256_s3 \
+  gemm_bm64_bn256_s2 \
+  gemm_bm256_bn128_s3 \
+  gemm_bm256_bn128_s2
 do
-  "$tmp/export_typedtree_modes" "$tmp/matmul_tiled.cmt" "$kernel" > "$out/$kernel.gpu"
+  "$tmp/export_typedtree_modes" "$tmp/gemm_fast.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \

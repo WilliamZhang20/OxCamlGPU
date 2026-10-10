@@ -28,7 +28,7 @@ run_matmul_emitter() {
   if [[ -n "$matmul_emitter" ]]; then
     "$matmul_emitter" "$@"
   else
-    dune exec test/emit_matmul_ptx.exe -- "$@"
+    dune exec test/emit_gemm_ptx.exe -- "$@"
   fi
 }
 
@@ -135,32 +135,32 @@ expect_tile () {
     exit 1
   fi
 }
-rg -q $'^arg\t0\ttensor_map\taliased\tglobal\tnonportable\tread\t' "$tmpdir/matmul_tiled.gpu"
-rg -q $'^arg\t2\tbuffer_f32\tunique\tglobal\tnonportable\tread_write\t' "$tmpdir/matmul_tiled.gpu"
-expect_tile matmul_tiled 288 256 64
-expect_tile matmul_bm128_bn256_s3 288 256 64
-expect_tile matmul_bm128_bn256_s2 288 256 64
-expect_tile matmul_bm128_bn128_s3 288 128 32
-expect_tile matmul_bm128_bn128_s2 288 128 32
-expect_tile matmul_bm64_bn256_s3 160 256 64
-expect_tile matmul_bm64_bn256_s2 160 256 64
-expect_tile matmul_bm256_bn128_s3 544 128 32
-expect_tile matmul_bm256_bn128_s2 544 128 32
+rg -q $'^arg\t0\ttensor_map\taliased\tglobal\tnonportable\tread\t' "$tmpdir/gemm_fast.gpu"
+rg -q $'^arg\t2\tbuffer_f32\tunique\tglobal\tnonportable\tread_write\t' "$tmpdir/gemm_fast.gpu"
+expect_tile gemm_fast 288 256 64
+expect_tile gemm_bm128_bn256_s3 288 256 64
+expect_tile gemm_bm128_bn256_s2 288 256 64
+expect_tile gemm_bm128_bn128_s3 288 128 32
+expect_tile gemm_bm128_bn128_s2 288 128 32
+expect_tile gemm_bm64_bn256_s3 160 256 64
+expect_tile gemm_bm64_bn256_s2 160 256 64
+expect_tile gemm_bm256_bn128_s3 544 128 32
+expect_tile gemm_bm256_bn128_s2 544 128 32
 choose_4096="$(run_matmul_emitter --print-choose 4096 4096 4096)"
 choose_8192="$(run_matmul_emitter --print-choose 8192 8192 8192)"
 choose_64="$(run_matmul_emitter --print-config 'bm=64,bn=256,bk=32,stages=2,producers=32,threads=160')"
-if [[ "$choose_4096" != "matmul_tiled 128 256 32 288" ]]; then
+if [[ "$choose_4096" != "gemm_fast 128 256 32 288" ]]; then
   echo "print-choose 4096: $choose_4096" >&2
   exit 1
 fi
-# The square shapes take the deepest measured pipeline, which is matmul_tiled
+# The square shapes take the deepest measured pipeline, which is gemm_fast
 # at four stages; a shallower ring leaves the TMA producers no slack once the
 # K loop keeps a WGMMA group in flight.
-if [[ "$choose_8192" != "matmul_tiled 128 256 32 288" ]]; then
+if [[ "$choose_8192" != "gemm_fast 128 256 32 288" ]]; then
   echo "print-choose 8192: $choose_8192" >&2
   exit 1
 fi
-if [[ "$choose_64" != "matmul_bm64_bn256_s2 64 256 32 160" ]]; then
+if [[ "$choose_64" != "gemm_bm64_bn256_s2 64 256 32 160" ]]; then
   echo "print-config 64x256 s2: $choose_64" >&2
   exit 1
 fi

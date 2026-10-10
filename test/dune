@@ -21,8 +21,8 @@
 ; The tile catalog is only ever used by this emitter, so it is a module of it
 ; rather than a library of its own.
 (executable
- (name emit_matmul_ptx)
- (modules emit_matmul_ptx matmul_config)
+ (name emit_gemm_ptx)
+ (modules emit_gemm_ptx gemm_catalog)
  (libraries oxgpu))
 
 (rule
@@ -30,7 +30,7 @@
  (action
   (run %{workspace_root}/test/run_oxcaml_tests.sh
    %{exe:check_compiler_metadata.exe} %{exe:emit_ptx.exe}
-   %{exe:emit_matmul_ptx.exe})))
+   %{exe:emit_gemm_ptx.exe})))
 
 (test
  (name test_control_flow)

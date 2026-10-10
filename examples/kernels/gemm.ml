@@ -1,26 +1,49 @@
-(* Hopper TF32 CTA GEMM. Mid-90s percent of cuBLAS at 4096 cubed, parity at
-   8192 cubed.
+(* Hopper TF32 GEMM. Mid-90s percent of cuBLAS at 4096 cubed, parity at 8192
+   cubed. C := A * B, TF32 inputs, f32 accumulate.
 
-   One schedule, specialized at compile time. Shared extents, WGMMA [n], and
-   accumulator indexes have to be constants, so each catalog tile is a binding
-   that applies [hopper_gemm] to constants.
+   Reading this file
+   -----------------
+   [hopper_gemm] is the schedule, written once and parameterized by the tile.
+   The bindings at the bottom are the only entry points: each applies the
+   schedule to one set of tile constants and carries the CTA width as
+   [[@@gpu.threads N]]. They exist because shared extents, the WGMMA [n] and
+   accumulator indexes must be compile-time constants, so a tile cannot be
+   chosen at run time. [gemm_fast] is the tuned default; the rest are named
+   after their tile and stage count and exist for the autotune sweep.
+   test/gemm_catalog.ml maps a problem size to one of these names.
 
-   [stages_n] barriers are allocated as one indexed set per direction, so the
-   stage count is a free parameter rather than a fixed ladder of separately
-   named barriers. That is what makes stages=4 reachable, and it is what
-   [choose_config] picks; see matmul_config.ml for the measurements.
+   [schedule]'s parameters are the kernel's arguments, and their types carry
+   OxCaml modes that the compiler checks and turns into GPU facts:
 
-   Three things here are load-bearing for performance, each explained where it
+     a_tmap, b_tmap : tensor_map @ aliased read
+       A TMA descriptor, the CUtensorMap the host builds to describe a global
+       tensor and the tile shape to copy out of it. [cp.async.bulk.tensor]
+       reads it. [aliased] says other references to it may exist, [read] says
+       this kernel only reads it.
+     c : float gpu_array @ unique read_write
+       The output buffer. [unique] says no other live reference aliases it,
+       which is what lets the backend treat its stores as non-aliasing;
+       [read_write] permits the epilogue's stores.
+     m_dim, n_dim, k : int
+       Problem dimensions.
+
+   Three things are load-bearing for performance, each explained where it
    happens: the grouped CTA order, keeping one WGMMA group in flight, and
    writing C's row stride so the compiler can prove the epilogue's stores are
-   aligned. docs/matmul-frontend.md collects them.
+   aligned. docs/gemm-frontend.md collects them.
 
-   The shared window is 148112 bytes, over sm_90's 48 KiB static cap, so the
-   launch must request it as dynamic shared memory; emit_matmul_ptx --info
-   reports the number. *)
+   Barriers are one indexed set per direction, so the stage count is a free
+   parameter rather than a fixed ladder; that is what makes stages=4
+   reachable. The shared window exceeds sm_90's 48 KiB static cap, so a launch
+   must request it as dynamic shared memory. emit_gemm_ptx --info reports both
+   the CTA width and that byte count. *)
 open Gpu_dsl
 
-let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m ~producers:_ =
+(* [bm]/[bn]/[bk] are the CTA tile, [stages_n] the pipeline depth, [group_m]
+   the CTA-order group height. Consumers are one WGMMA warpgroup per 64 rows;
+   the remaining warp issues TMA, so a binding's [[@@gpu.threads]] is
+   [consumers + 32]. *)
+let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m =
   let consumers = 128 * (bm / 64) in
   let schedule
       (a_tmap : tensor_map @ aliased read)
@@ -178,38 +201,38 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m ~producers:_ =
   in
   schedule
 
-let matmul_tiled =
-  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:4 ~group_m:16 ~producers:32
+let gemm_fast =
+  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:4 ~group_m:16
 [@@gpu.threads 288]
 
-let matmul_bm128_bn256_s3 =
-  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:3 ~group_m:16 ~producers:32
+let gemm_bm128_bn256_s3 =
+  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:3 ~group_m:16
 [@@gpu.threads 288]
 
-let matmul_bm128_bn256_s2 =
-  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:2 ~group_m:16 ~producers:32
+let gemm_bm128_bn256_s2 =
+  hopper_gemm ~bm:128 ~bn:256 ~bk:32 ~stages_n:2 ~group_m:16
 [@@gpu.threads 288]
 
-let matmul_bm128_bn128_s3 =
-  hopper_gemm ~bm:128 ~bn:128 ~bk:32 ~stages_n:3 ~group_m:16 ~producers:32
+let gemm_bm128_bn128_s3 =
+  hopper_gemm ~bm:128 ~bn:128 ~bk:32 ~stages_n:3 ~group_m:16
 [@@gpu.threads 288]
 
-let matmul_bm128_bn128_s2 =
-  hopper_gemm ~bm:128 ~bn:128 ~bk:32 ~stages_n:2 ~group_m:16 ~producers:32
+let gemm_bm128_bn128_s2 =
+  hopper_gemm ~bm:128 ~bn:128 ~bk:32 ~stages_n:2 ~group_m:16
 [@@gpu.threads 288]
 
-let matmul_bm64_bn256_s3 =
-  hopper_gemm ~bm:64 ~bn:256 ~bk:32 ~stages_n:3 ~group_m:16 ~producers:32
+let gemm_bm64_bn256_s3 =
+  hopper_gemm ~bm:64 ~bn:256 ~bk:32 ~stages_n:3 ~group_m:16
 [@@gpu.threads 160]
 
-let matmul_bm64_bn256_s2 =
-  hopper_gemm ~bm:64 ~bn:256 ~bk:32 ~stages_n:2 ~group_m:16 ~producers:32
+let gemm_bm64_bn256_s2 =
+  hopper_gemm ~bm:64 ~bn:256 ~bk:32 ~stages_n:2 ~group_m:16
 [@@gpu.threads 160]
 
-let matmul_bm256_bn128_s3 =
-  hopper_gemm ~bm:256 ~bn:128 ~bk:32 ~stages_n:3 ~group_m:16 ~producers:32
+let gemm_bm256_bn128_s3 =
+  hopper_gemm ~bm:256 ~bn:128 ~bk:32 ~stages_n:3 ~group_m:16
 [@@gpu.threads 544]
 
-let matmul_bm256_bn128_s2 =
-  hopper_gemm ~bm:256 ~bn:128 ~bk:32 ~stages_n:2 ~group_m:16 ~producers:32
+let gemm_bm256_bn128_s2 =
+  hopper_gemm ~bm:256 ~bn:128 ~bk:32 ~stages_n:2 ~group_m:16
 [@@gpu.threads 544]

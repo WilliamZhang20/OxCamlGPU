@@ -1,4 +1,4 @@
-# Matmul frontend design
+# GEMM frontend design
 
 Status: design revision — **authors keep hardware control**. There is no
 “call `matmul` and kaboom” primary path. The compiler verifies modes/layouts and
@@ -6,18 +6,18 @@ lowers what you wrote; it does not invent a CTA tile schedule behind your back.
 
 ## Where the performant kernel lives
 
-**[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml)** —
+**[`examples/kernels/gemm.ml`](../examples/kernels/gemm.ml)** —
 Hopper TMA producers + WGMMA consumers, software-pipelined K loop, written as
 ordinary OxCaml + `Gpu.*`. `hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m` is the
 schedule.
-Each catalog tile is a binding that applies it to constants (`matmul_tiled` is
+Each catalog tile is a binding that applies it to constants (`gemm_fast` is
 128×256×32, stages=3, 288 threads). Shared extents, WGMMA `n`, and accumulator
 indexes are those constants. Stages are 2 or 3; the mbarrier ladder stays three
 deep because the stage index is dynamic.
 
-Emit an OxCaml specialization with `emit_matmul_ptx --gpu …/NAME.gpu`.
-`emit_matmul_ptx --print-choose M N K` prints `name bm bn bk threads`
-(see [HANDOFF-matmul-kernel.md](HANDOFF-matmul-kernel.md)).
+Emit an OxCaml specialization with `emit_gemm_ptx --gpu …/NAME.gpu`.
+`emit_gemm_ptx --print-choose M N K` prints `name bm bn bk threads`
+(see [gemm-kernel-status.md](gemm-kernel-status.md)).
 
 ## Frontend surface (what authors control)
 
@@ -35,7 +35,7 @@ order and which rows a warpgroup owns stay with the author.
 
 There is no `Gpu.matmul`, and no IR-builder path either. Schedules are
 ordinary OxCaml using those ops; the Hopper kernel is
-[`examples/kernels/matmul_tiled.ml`](../examples/kernels/matmul_tiled.ml),
+[`examples/kernels/gemm.ml`](../examples/kernels/gemm.ml),
 beside the other kernels.
 Autotune walks that catalog through the OxCaml specializations.
 
@@ -59,9 +59,9 @@ shared layout legality) — not a substitute for writing the algorithm.
 
 | Path | Owns |
 | --- | --- |
-| `examples/kernels/matmul_tiled.ml` | **The schedule**: TMA producer elect + WGMMA consumers, and the catalog's bindings as applications of it to constants |
-| `test/matmul_config.ml` | Tile shapes, `stages`/`producers`, catalog, `choose_config`, `kernel_binding`, parse |
-| `test/emit_matmul_ptx.ml` | The emitter: `--gpu`, `--info`, `--print-choose`, `--print-config`, `--list-catalog` |
+| `examples/kernels/gemm.ml` | **The schedule**: TMA producer elect + WGMMA consumers, and the catalog's bindings as applications of it to constants |
+| `test/gemm_catalog.ml` | Tile shapes, `stages`/`producers`, catalog, `choose_config`, `kernel_binding`, parse |
+| `test/emit_gemm_ptx.ml` | The emitter: `--gpu`, `--info`, `--print-choose`, `--print-config`, `--list-catalog` |
 
 Every kernel is in `examples/kernels/`, including this one. The catalog is a
 module of the emitter, its only consumer, rather than a library of its own.
@@ -73,12 +73,12 @@ warpgroups); `[consumers, threads)` issue TMA (`cp.async.bulk.tensor`).
 
 The kernel's shared window is 148112 bytes at the default tile, far over
 sm_90's 48 KiB static cap, so it is emitted as the dynamic window and **the
-launch must request it**. `emit_matmul_ptx --info FILE.gpu` prints
+launch must request it**. `emit_gemm_ptx --info FILE.gpu` prints
 `threads dynamic_smem total_smem`; the PTX also carries
 `// oxgpu.shared.dynamic N`. A launcher must call
 `cuFuncSetAttribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, N)`
 before the first launch and pass `N` as the dynamic shared argument.
-`bench/run.sh` and `test/hardware/run_matmul_h100.sh` both do this. See
+`bench/run.sh` and `test/hardware/run_gemm_h100.sh` both do this. See
 [shared memory](architecture.md#shared-memory).
 
 ## Three idioms worth knowing
@@ -117,12 +117,12 @@ it needs nothing from the compiler.
 
 1. Ascending OxCaml `for` is in the Typedtree adapter. `ref` is still out
    ([loops.md](loops.md)).
-2. `examples/kernels/matmul_tiled.ml` is the TMA + WGMMA schedule. All eight
+2. `examples/kernels/gemm.ml` is the TMA + WGMMA schedule. All eight
    catalog specializations assemble for `sm_90a` with no register spills, and
    256³ is checked against a CPU reference on hardware by
-   `test/hardware/run_matmul_h100.sh`. The 4096³ and 8192³ bench runs check against
+   `test/hardware/run_gemm_h100.sh`. The 4096³ and 8192³ bench runs check against
    `torch.matmul` before timing.
-3. `bench/run.sh` and `emit_matmul_ptx --gpu` use those `.gpu` files.
+3. `bench/run.sh` and `emit_gemm_ptx --gpu` use those `.gpu` files.
    `--print-choose` picks the specialization, always at stages=3.
 4. A repeatable mid-90s percentage of cuBLAS at 4096³, and parity at 8192³
    ([numbers](architecture.md#measured-gemm-performance)). Under Nsight

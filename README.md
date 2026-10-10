@@ -7,12 +7,12 @@ narrow kernel subset. The OxCaml frontend exposes **compute hierarchy**
 (indices, barriers, elect) and **memory hierarchy** (global/shared, vector
 and async copies, TMA/mbarrier, WGMMA descriptors) — not a matmul expand.
 The performant Hopper GEMM schedule is the OxCaml kernel
-[`examples/kernels/matmul_tiled.ml`](examples/kernels/matmul_tiled.ml):
+[`examples/kernels/gemm.ml`](examples/kernels/gemm.ml):
 one function of the tile constants, specialized to the catalog bindings.
 There is no IR-builder path. Every kernel lives in
 [`examples/kernels/`](examples/kernels/); the tile catalog that maps a problem
-size to one of them is a module of `test/emit_matmul_ptx.ml`. See
-[matmul frontend design](docs/matmul-frontend.md).
+size to one of them is a module of `test/emit_gemm_ptx.ml`. See
+[GEMM frontend design](docs/gemm-frontend.md).
 
 On an H100 that kernel holds a repeatable **mid-90s percentage of cuBLAS** at
 4096³ TF32 and runs at parity at 8192³. Under Nsight Compute the durations
@@ -46,7 +46,7 @@ width. Constant `for` loops of at most 64 iterations are unrolled. `downto`,
 `ref` cells, recursive helpers, shaped source tensors, and buffer-valued
 branches are not supported yet. The matmul authoring model (explicit shared, barriers,
 and WGMMA — not a black-box matmul) is in
-[matmul frontend design](docs/matmul-frontend.md).
+[GEMM frontend design](docs/gemm-frontend.md).
 
 OxCaml `unique`, `aliased`, locality, portability, and visibility modes are represented as GPU semantic facts. They remain distinct from physical memory placement and GPU address space. See [mode and memory semantics](docs/architecture.md#types-modes-and-memory).
 
@@ -72,6 +72,6 @@ Run the host-side checks with `dune runtest`. CUDA execution and benchmarking in
 ## Project notes
 
 - [Architecture, semantics, and implementation limits](docs/architecture.md)
-- [Matmul frontend design](docs/matmul-frontend.md)
+- [Matmul frontend design](docs/gemm-frontend.md)
 - [Frontend expansion plan](docs/frontend-expansion.md)
 - [Loop design](docs/loops.md)
