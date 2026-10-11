@@ -106,6 +106,44 @@ identified by compiler identity (`path_uid`), not by name, so shadowing is
 already impossible. This looks safe to relax and is the single cheapest
 usability win here.
 
+## Writing CPU code in a kernel
+
+The GPU surface is a whitelist, and `typedtree_support.ml` matches it by
+compiler identity (`Types.Uid.equal` on the value description) rather than by
+name. So an ordinary Stdlib function has no GPU meaning however well it
+typechecks, and a user function that shadows a primitive's name is a different
+uid and stays rejected. Tried against the adapter:
+
+| In the kernel | Result |
+| --- | --- |
+| `print_endline`, `failwith`, `sqrt` | rejected, with a source location |
+| `ref` / `!` / `:=` | rejected |
+| `List.map`, `String.length` | rejected |
+| `raise`, `try ... with` | rejected |
+| An OCaml `array` literal, a string literal | rejected |
+| A mutable record and a field assignment | rejected |
+| A CPU helper defined but never applied | accepted, never traced |
+| A module-level `let () = ...` initialiser | accepted, never traced |
+
+So the answer to "what if I write CPU primitives in a kernel" is that it is a
+compile error naming the line, not a miscompile and not a silent fallback to
+the host. `test/fixtures/reject_cpu_primitive.ml` pins that, and
+`reject_operator.ml` pins the shadowing case.
+
+There is exactly one gap, and it follows from the design rather than being an
+oversight. The adapter checks what survives specialization, so a CPU call in a
+branch whose condition folds away is never traced and never seen:
+
+```ocaml
+if 1 = 2 then print_endline "unreachable";   (* accepted *)
+```
+
+That is semantically harmless, since the call cannot execute and nothing is
+emitted for it. It does mean "the kernel compiled" is a claim about the
+specialized program, not about every line of source. The same is true of a
+helper that is defined but never applied, which is the usual and correct
+behaviour for a partial evaluator.
+
 ## Tier 1: more of the same staging
 
 All of this stays inside the existing model. Nothing reaches run time.

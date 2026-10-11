@@ -172,7 +172,7 @@ done
 # Real Typedtree negative fixtures: reject declaration lookalikes, unsupported
 # native integer ranges, and source constructs not yet implemented.
 for fixture in reject_shadow reject_overflow reject_fake_type reject_loop \
-  reject_operator reject_unbounded_recursion; do
+  reject_operator reject_unbounded_recursion reject_cpu_primitive; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$fixture.cmo" "test/fixtures/$fixture.ml"
   if "$tmp/export_typedtree_modes" "$tmp/$fixture.cmt" "$fixture" > "$tmp/rejected.gpu" 2> "$tmp/rejected.err"; then
