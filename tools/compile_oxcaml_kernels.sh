@@ -112,6 +112,13 @@ for kernel in block_sum block_max; do
   "$tmp/export_typedtree_modes" "$tmp/block_reduce.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
+# Row normalizations: the float intrinsics in two real ops.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/row_norm.cmo" examples/kernels/row_norm.ml
+for kernel in softmax_256 rms_norm_256; do
+  "$tmp/export_typedtree_modes" "$tmp/row_norm.cmt" "$kernel" > "$out/$kernel.gpu"
+done
+
 for kernel in saxpy vector_add dot_product; do
   "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
     -o "$tmp/$kernel.cmo" "examples/kernels/$kernel.ml"
@@ -142,6 +149,12 @@ do
   "$tmp/export_typedtree_modes" "$tmp/gemm_fast.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
+# The same schedule at the other input width; see examples/kernels/gemm_bf16.ml.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/gemm_bf16_fast.cmo" examples/kernels/gemm_bf16.ml
+"$tmp/export_typedtree_modes" "$tmp/gemm_bf16_fast.cmt" gemm_bf16_fast \
+  > "$out/gemm_bf16_fast.gpu"
+
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/unique_reuse.cmo" test/fixtures/unique_reuse.ml
 "$tmp/export_typedtree_modes" "$tmp/unique_reuse.cmt" unique_reuse > "$out/unique_reuse.gpu"
@@ -153,6 +166,19 @@ done
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
   -o "$tmp/functional.cmo" test/fixtures/functional.ml
 "$tmp/export_typedtree_modes" "$tmp/functional.cmt" functional > "$out/functional.gpu"
+
+# Every float intrinsic must reach its one PTX instruction.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/float_math.cmo" test/fixtures/float_math.ml
+for kernel in float_math float_extremes; do
+  "$tmp/export_typedtree_modes" "$tmp/float_math.cmt" "$kernel" > "$out/$kernel.gpu"
+done
+
+# f16 is the third WGMMA width; there is no hardware test for it, so the
+# compiled instruction is the claim. See test/fixtures/f16_wgmma.ml.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/f16_wgmma.cmo" test/fixtures/f16_wgmma.ml
+"$tmp/export_typedtree_modes" "$tmp/f16_wgmma.cmt" f16_wgmma > "$out/f16_wgmma.gpu"
 
 # The index operators must reach i32 arithmetic with no range proof.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
@@ -168,6 +194,39 @@ done
 for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch joined_reduction divergent_reduction rounding indexed_stores; do
   "$tmp/export_typedtree_modes" "$tmp/control_flow.cmt" "$kernel" > "$out/$kernel.gpu"
 done
+
+# The compile-time evaluation limits behave like compiler flags, so test the
+# mechanism at a low setting rather than legislating kernel size. A kernel that
+# is large on purpose is the author's business; these only have to fire.
+if OXGPU_MAX_OPERATIONS=100 "$tmp/export_typedtree_modes" \
+     "$tmp/gemm_fast.cmt" gemm_fast > "$tmp/rejected.gpu" 2> "$tmp/rejected.err"; then
+  echo "Unexpectedly accepted a kernel past OXGPU_MAX_OPERATIONS" >&2; exit 1
+fi
+rg -q 'OXGPU_MAX_OPERATIONS' "$tmp/rejected.err"
+if [[ -s "$tmp/rejected.gpu" ]]; then
+  echo "Failed adapter left a partial artifact" >&2; exit 1
+fi
+
+# Nesting is the one guard against an uncatchable host crash: a deep enough
+# expression exhausts the adapter's own recursion while emitting too little
+# for the operation budget to see, and native-code OCaml cannot reliably
+# catch Stack_overflow.
+{
+  echo 'open Gpu_dsl'
+  echo 'let deep_nesting : float gpu_array @ aliased read_write -> unit ='
+  echo 'fun y ->'
+  echo '  let i = Gpu.thread_idx_x () in'
+  printf '  Gpu.store y (i'
+  for _ in $(seq 100); do printf ' +: 1'; done
+  echo ') 1.'
+} > "$tmp/deep_nesting.ml"
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/deep_nesting.cmo" "$tmp/deep_nesting.ml"
+if OXGPU_MAX_NESTING=32 "$tmp/export_typedtree_modes" \
+     "$tmp/deep_nesting.cmt" deep_nesting > "$tmp/rejected.gpu" 2> "$tmp/rejected.err"; then
+  echo "Unexpectedly accepted an expression past OXGPU_MAX_NESTING" >&2; exit 1
+fi
+rg -q 'expression nested deeper than' "$tmp/rejected.err"
 
 # Real Typedtree negative fixtures: reject declaration lookalikes, unsupported
 # native integer ranges, and source constructs not yet implemented.

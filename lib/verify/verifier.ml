@@ -85,6 +85,11 @@ let verify_kernel k =
         true
     | _ -> false
   in
+  (* A GMMA descriptor erases its tile's element type to u64, so the source
+     type system is what stops an f32 tile from feeding a bf16 WGMMA. The IR
+     has to answer for itself: record what each descriptor was built from and
+     require the instruction's element type to agree. *)
+  let descriptor_element : (int, Gpu_type.dtype) Hashtbl.t = Hashtbl.create 8 in
   let rec visit seen nested body =
   List.iter (fun i ->
     current_loc := (match results i @ operands i with
@@ -150,6 +155,19 @@ let verify_kernel k =
     | Mad_f32 (dst, a, b, c) ->
         if dst.ty <> F32 || a.ty <> F32 || b.ty <> F32 || c.ty <> F32 then
           add "E_ARITH_TYPE" "mad_f32 requires an f32 result and f32 operands"
+    | Unary_f32 (dst, op, a) ->
+        if dst.ty <> F32 || a.ty <> F32 then
+          add "E_ARITH_TYPE"
+            (Printf.sprintf "%s requires an f32 result and f32 operand"
+               (string_of_unary_f32 op))
+    | F32_of_i32 (dst, a) ->
+        if dst.ty <> F32 || a.ty <> I32 then
+          add "E_ARITH_TYPE" "float_of_int requires an f32 result and i32 operand"
+    | Binary_f32 (dst, op, a, b) ->
+        if dst.ty <> F32 || a.ty <> F32 || b.ty <> F32 then
+          add "E_ARITH_TYPE"
+            (Printf.sprintf "%s requires an f32 result and f32 operands"
+               (string_of_binary_f32 op))
     (* --- global memory --- *)
     | Store_f32 (ptr, value) ->
         (match ptr.ty, value.ty with
@@ -322,7 +340,8 @@ let verify_kernel k =
     | Tma_load_2d (smem, index, tmap, c0, c1, mbar, pred) ->
         Option.iter (fun p -> if p.ty <> Bool then add "E_CONDITION_TYPE" "TMA pred must be bool") pred;
         (match memref_type smem.ty, index.ty, tmap.ty, c0.ty, c1.ty, memref_type mbar.ty with
-         | Some (_, Float32, Shared), I32, Tensor_map, I32, I32, Some ([Static 2], Int32, Shared) ->
+         | Some (_, (Float32 | Bfloat16 | Float16), Shared), I32, Tensor_map, I32, I32,
+           Some ([Static 2], Int32, Shared) ->
              (match smem.layout with
               | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
               | _ -> add "E_SHARED_LAYOUT" "TMA destination requires a shared MemRef layout");
@@ -334,15 +353,32 @@ let verify_kernel k =
                add "E_READONLY_STORE" "TMA mbarrier must be writable"
          | _ ->
              add "E_TMA_TYPE"
-               "TMA load requires shared f32 MemRef, i32 index, Tensor_map, i32 coords, and shared i32[2] mbarrier")
-    | Wgmma_mma_tf32 (acc, desc_a, desc_b, n, _) ->
+               "TMA load requires a shared float MemRef, i32 index, Tensor_map, \
+                i32 coords, and shared i32[2] mbarrier")
+    | Wgmma_mma (element, acc, desc_a, desc_b, n, _) ->
         let n_ok = n >= 8 && n <= 256 && n mod 8 = 0 in
         let expect = n / 2 in
+        (* The accumulator is f32 m64xn at every input width, so the register
+           count does not depend on the element type; only K does. *)
         if not n_ok then
           add "E_WGMMA_SHAPE" "WGMMA n must be in {8,16,...,256}";
+        (match element with
+         | Float32 | Bfloat16 | Float16 -> ()
+         | Int32 -> add "E_WGMMA_TYPE" "WGMMA operands must be a float element type");
+        List.iter
+          (fun (name, desc) ->
+            match Hashtbl.find_opt descriptor_element desc.id with
+            | Some tile when tile <> element ->
+                add "E_WGMMA_TYPE"
+                  (Printf.sprintf
+                     "WGMMA reads %s as %s but descriptor %s was built from a \
+                      %s tile"
+                     name (string_of_dtype element) name (string_of_dtype tile))
+            | _ -> ())
+          ["A", desc_a; "B", desc_b];
         if List.length acc <> expect then
           add "E_WGMMA_ACC"
-            (Printf.sprintf "WGMMA m64n%dk8 expects %d f32 acc regs per thread" n expect);
+            (Printf.sprintf "WGMMA m64n%d expects %d f32 acc regs per thread" n expect);
         List.iter (fun v ->
           if v.ty <> F32 then add "E_WGMMA_ACC" "WGMMA accumulator registers must be f32") acc;
         if desc_a.ty <> U64 || desc_b.ty <> U64 then
@@ -356,11 +392,12 @@ let verify_kernel k =
            || fields.layout_type < 0 || fields.layout_type > 3 then
           add "E_GMMA_DESC" "Gmma_descriptor fields out of range";
         (match memref_type smem.ty with
-         | Some (_, Float32, Shared) ->
+         | Some (_, ((Float32 | Bfloat16 | Float16) as element), Shared) ->
+             Hashtbl.replace descriptor_element dst.id element;
              if not (readable smem.permission) then
                add "E_UNREADABLE_LOAD" "Gmma_descriptor shared operand must be readable"
          | _ ->
-             add "E_GMMA_DESC" "Gmma_descriptor requires a shared f32 MemRef")
+             add "E_GMMA_DESC" "Gmma_descriptor requires a shared float MemRef")
     (* --- tensors --- *)
     | Load_tensor (dst, src) ->
         (match tile_type dst.ty, memref_type src.ty with

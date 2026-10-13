@@ -66,7 +66,7 @@ let emit_target (kernel : Ptx_ir.kernel) =
   line ".version 8.5";
   let has_wgmma =
     List.exists (function
-      | Ptx_ir.Wgmma_fence | Ptx_ir.Wgmma_mma_tf32 _
+      | Ptx_ir.Wgmma_fence | Ptx_ir.Wgmma_mma _
       | Ptx_ir.Gmma_descriptor _
       | Ptx_ir.Wgmma_commit_group | Ptx_ir.Wgmma_wait_group _ -> true
       | _ -> false) kernel.body
@@ -147,10 +147,21 @@ let emit_target (kernel : Ptx_ir.kernel) =
         "shared"
     | _ -> invalid_arg "tile address must be global or shared MemRef" in
   let preg v = "%p" ^ string_of_int v.id in
+  (* Element width comes from the MemRef's own dtype, so a bf16 tile strides
+     by two bytes without any op knowing its own width. Nothing else is
+     addressable by element, so anything else is a lowering bug, not a 4. *)
+  let element_bytes (memref : Ir.value) =
+    match memref.Ir.ty with
+    | Gpu_type.MemRef (_, dtype, _) -> Gpu_type.dtype_storage_bytes dtype
+    | ty ->
+        invalid_arg
+          ("element addressing requires a MemRef, got " ^ Gpu_type.string_of_ty ty)
+  in
   (* Shared element addresses stay linear. Swizzle_*B on a Shared layout is a
      hardware TMA/GMMA mode bit, not a software XOR of the index. *)
   let emit_shared_addr memref index_reg =
-    line (Printf.sprintf "  mul.wide.u32 %s, %s, 4;" offset_scratch index_reg);
+    line (Printf.sprintf "  mul.wide.u32 %s, %s, %d;" offset_scratch index_reg
+      (element_bytes memref));
     emit_shared_window address_scratch memref;
     line (Printf.sprintf "  add.u64 %s, %s, %s;" address_scratch address_scratch offset_scratch)
   in
@@ -316,6 +327,32 @@ let emit_target (kernel : Ptx_ir.kernel) =
     | Ptx_ir.Tensor_mul_f32 (dst, a, c) -> line (Printf.sprintf "  mul.rn.f32 %s, %s, %s;" (freg dst) (freg a) (freg c))
     | Ptx_ir.Mad_f32 (dst, a, b, c) ->
         line (Printf.sprintf "  fma.rn.f32 %s, %s, %s, %s;" (freg dst) (freg a) (freg b) (freg c))
+    | Ptx_ir.Unary_f32 (dst, op, a) ->
+        (* [.rn] where the hardware rounds correctly, [.approx] where the
+           source asked for the fast unit by name. *)
+        let mnemonic = match op with
+          | Gpu_type.Negate -> "neg.f32"
+          | Gpu_type.Absolute -> "abs.f32"
+          | Gpu_type.Sqrt -> "sqrt.rn.f32"
+          | Gpu_type.Rsqrt_approx -> "rsqrt.approx.f32"
+          | Gpu_type.Exp2_approx -> "ex2.approx.f32"
+          | Gpu_type.Log2_approx -> "lg2.approx.f32"
+          | Gpu_type.Tanh_approx -> "tanh.approx.f32"
+          | Gpu_type.Recip_approx -> "rcp.approx.f32"
+        in
+        line (Printf.sprintf "  %s %s, %s;" mnemonic (freg dst) (freg a))
+    | Ptx_ir.F32_of_i32 (dst, a) ->
+        line (Printf.sprintf "  cvt.rn.f32.s32 %s, %s;" (freg dst) (reg a))
+    | Ptx_ir.Binary_f32 (dst, op, a, b) ->
+        (* [.NaN] on max/min so [Float.max] keeps its OCaml meaning: PTX
+           without it returns the non-NaN operand, which OCaml does not. *)
+        let mnemonic = match op with
+          | Gpu_type.Subtract -> "sub.rn.f32"
+          | Gpu_type.Divide -> "div.rn.f32"
+          | Gpu_type.Maximum -> "max.NaN.f32"
+          | Gpu_type.Minimum -> "min.NaN.f32"
+        in
+        line (Printf.sprintf "  %s %s, %s, %s;" mnemonic (freg dst) (freg a) (freg b))
     | Ptx_ir.Load_f32 (dst, ptr) -> line (Printf.sprintf "  ld.global.f32 %s, [%s];" (freg dst) (ptrreg ptr))
     | Ptx_ir.Load_f32x4 (a, b, c, d, ptr) ->
         line (Printf.sprintf "  ld.global.nc.v4.f32 {%s, %s, %s, %s}, [%s];"
@@ -394,12 +431,28 @@ let emit_target (kernel : Ptx_ir.kernel) =
         line (Printf.sprintf "  wgmma.wait_group.sync.aligned %d;" n)
     | Ptx_ir.Gmma_descriptor (dst, smem, index, fields) ->
         emit_gmma_descriptor dst smem index fields
-    | Ptx_ir.Wgmma_mma_tf32 (acc, desc_a, desc_b, n, scale_d) ->
+    | Ptx_ir.Wgmma_mma (element, acc, desc_a, desc_b, n, scale_d) ->
         let acc_regs = String.concat ", " (List.map freg acc) in
         let scale = if scale_d then 1 else 0 in
+        (* K and the operand suffix are the one thing the element type picks;
+           the m64, the f32 accumulator and the operand order are the same
+           across widths, which is why one instruction serves all three.
+
+           The 16-bit forms take two further immediates, [trans-a] and
+           [trans-b]. Both are 0: a [shared_wgmma] tile is K-major, which is
+           the orientation the untransposed form expects. The tf32 form has no
+           such operands, because K-major is the only layout it accepts. *)
+        let k, operand, transpose = match element with
+          | Gpu_type.Float32 -> 8, "tf32", ""
+          | Gpu_type.Bfloat16 -> 16, "bf16", ", 0, 0"
+          | Gpu_type.Float16 -> 16, "f16", ", 0, 0"
+          | Gpu_type.Int32 ->
+              invalid_arg "WGMMA operands must be a float element type"
+        in
         line (Printf.sprintf
-          "  wgmma.mma_async.sync.aligned.m64n%dk8.f32.tf32.tf32 {%s}, %s, %s, %d, 1, 1;"
-          n acc_regs (ptrreg desc_a) (ptrreg desc_b) scale)
+          "  wgmma.mma_async.sync.aligned.m64n%dk%d.f32.%s.%s {%s}, %s, %s, %d, 1, 1%s;"
+          n k operand operand acc_regs (ptrreg desc_a) (ptrreg desc_b) scale
+          transpose)
     (* --- physicalized tiles --- *)
     | Ptx_ir.Tile_load_f32 (tensor, memref) ->
         let space = emit_tile_address memref ~base_offset:0 ~lane_stride:1 in

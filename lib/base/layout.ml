@@ -339,12 +339,21 @@ let string_of_swizzle = function
   | Swizzle_64B -> "64B"
   | Swizzle_128B -> "128B"
 
-(** XOR mask (in elements) for column swizzle: col' = col XOR (row AND mask). *)
-let swizzle_element_mask = function
+(** Width of one swizzle period in bytes. This is the hardware quantity; how
+    many elements it spans depends on the element type. *)
+let swizzle_bytes = function
   | No_swizzle -> None
-  | Swizzle_32B -> Some 7
-  | Swizzle_64B -> Some 15
-  | Swizzle_128B -> Some 31
+  | Swizzle_32B -> Some 32
+  | Swizzle_64B -> Some 64
+  | Swizzle_128B -> Some 128
+
+(** XOR mask (in elements) for column swizzle: col' = col XOR (row AND mask).
+    A 128-byte period is 32 f32 columns but 64 bf16 columns, so the mask is
+    derived from the element width rather than written out. *)
+let swizzle_element_mask swizzle dtype =
+  Option.map
+    (fun bytes -> bytes / Gpu_type.dtype_storage_bytes dtype - 1)
+    (swizzle_bytes swizzle)
 
 let rec string_of_t = function
   | Register r ->

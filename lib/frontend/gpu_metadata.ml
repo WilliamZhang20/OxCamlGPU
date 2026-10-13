@@ -38,12 +38,21 @@ let parse_memory s =
   | ["val"; _] -> Pointer (parse_atom s)
   | _ -> fail "invalid memory reference"
 
+let dtype = Gpu_type.string_of_dtype
+
+let parse_dtype = function
+  | "f32" -> Float32
+  | "bf16" -> Bfloat16
+  | "f16" -> Float16
+  | "i32" -> Int32
+  | other -> fail ("unsupported element type: " ^ other)
+
 let ty = function
   | I32 -> "scalar_i32"
   | F32 -> "scalar_f32"
   | Bool -> "bool"
   | Unit -> "unit"
-  | MemRef ([Dynamic], Float32, Global) -> "buffer_f32"
+  | MemRef ([Dynamic], d, Global) -> "buffer_" ^ dtype d
   | Tensor_map -> "tensor_map"
   | U64 -> "scalar_u64"
   | other -> fail ("unsupported frontend type: " ^ Gpu_type.string_of_ty other)
@@ -54,6 +63,8 @@ let parse_ty = function
   | "bool" -> Bool
   | "unit" -> Unit
   | "buffer_f32" -> MemRef ([Dynamic], Float32, Global)
+  | "buffer_bf16" -> MemRef ([Dynamic], Bfloat16, Global)
+  | "buffer_f16" -> MemRef ([Dynamic], Float16, Global)
   | "tensor_map" -> Tensor_map
   | "scalar_u64" -> U64
   | _ -> fail "unsupported frontend type"
@@ -188,8 +199,13 @@ let encode k =
               ["store_f32x4"; atom p; atom a; atom b; atom c; atom d]
           | Mad_f32 (d, acc, a, b) ->
               ["mad_f32"; n d; atom acc; atom a; atom b]
-          | Shared_alloc (d, rows, cols, layout) ->
-              [ "shared_alloc"; n d; n rows; n cols
+          | Unary_f32 (d, op, a) ->
+              ["unary_f32"; n d; Gpu_type.string_of_unary_f32 op; atom a]
+          | Binary_f32 (d, op, a, b) ->
+              ["binary_f32"; n d; Gpu_type.string_of_binary_f32 op; atom a; atom b]
+          | F32_of_i32 (d, a) -> ["f32_of_i32"; n d; atom a]
+          | Shared_alloc (d, rows, cols, element, layout) ->
+              [ "shared_alloc"; n d; n rows; n cols; dtype element
               ; (match layout with `Plain -> "plain" | `Wgmma -> "wgmma") ]
           | Shared_load_f32 (d, m, i) ->
               ["shared_load_f32"; n d; atom m; atom i]
@@ -226,8 +242,8 @@ let encode k =
           | Wgmma_fence -> ["wgmma_fence"]
           | Gmma_descriptor (d, sm, idx) ->
               ["gmma_descriptor"; n d; atom sm; atom idx]
-          | Wgmma_mma_tf32 (acc, da, db, nn, scale) ->
-              ["wgmma_mma_tf32"; String.concat "," (List.map n acc);
+          | Wgmma_mma (element, acc, da, db, nn, scale) ->
+              ["wgmma_mma"; dtype element; String.concat "," (List.map n acc);
                atom da; atom db; n nn; string_of_bool scale]
           | Wgmma_commit_group -> ["wgmma_commit_group"]
           | Wgmma_wait_group k -> ["wgmma_wait_group"; n k]
@@ -388,18 +404,25 @@ let parse source =
                 (parse_atom p, parse_atom a, parse_atom b, parse_atom c, parse_atom d)
           | ["body"; "mad_f32"; d; acc; a; b] ->
               Mad_f32 (id d, parse_atom acc, parse_atom a, parse_atom b)
-          | ["body"; "shared_alloc"; d; rows; cols; layout] ->
+          | ["body"; "unary_f32"; d; op; a] ->
+              (match Gpu_type.unary_f32_of_string op with
+               | Some op -> Unary_f32 (id d, op, parse_atom a)
+               | None -> fail ("unsupported float intrinsic: " ^ op))
+          | ["body"; "f32_of_i32"; d; a] -> F32_of_i32 (id d, parse_atom a)
+          | ["body"; "binary_f32"; d; op; a; b] ->
+              (match Gpu_type.binary_f32_of_string op with
+               | Some op -> Binary_f32 (id d, op, parse_atom a, parse_atom b)
+               | None -> fail ("unsupported float intrinsic: " ^ op))
+          | ["body"; "shared_alloc"; d; rows; cols; element; layout] ->
               Shared_alloc
                 ( id d
                 , integer rows
                 , integer cols
+                , parse_dtype element
                 , (match layout with
                    | "plain" -> `Plain
                    | "wgmma" -> `Wgmma
                    | _ -> fail "invalid shared layout") )
-          | ["body"; "shared_alloc"; d; rows; cols] ->
-              (* Pre-layout metadata: plain CTA shared. *)
-              Shared_alloc (id d, integer rows, integer cols, `Plain)
           | ["body"; "shared_load_f32"; d; m; i] ->
               Shared_load_f32 (id d, parse_atom m, parse_atom i)
           | ["body"; "shared_load_f32x4"; a; b; c; d; m; i] ->
@@ -439,9 +462,10 @@ let parse source =
           | ["body"; "wgmma_fence"] -> Wgmma_fence
           | ["body"; "gmma_descriptor"; d; sm; idx] ->
               Gmma_descriptor (id d, parse_atom sm, parse_atom idx)
-          | ["body"; "wgmma_mma_tf32"; acc; da; db; nn; scale] ->
-              Wgmma_mma_tf32
-                ( parse_id_list acc, parse_atom da, parse_atom db, integer nn
+          | ["body"; "wgmma_mma"; element; acc; da; db; nn; scale] ->
+              Wgmma_mma
+                ( parse_dtype element
+                , parse_id_list acc, parse_atom da, parse_atom db, integer nn
                 , (match scale with
                    | "true" -> true
                    | "false" -> false

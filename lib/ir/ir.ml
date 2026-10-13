@@ -51,6 +51,11 @@ type instr =
   | Min_i32 of value * value * value
   | Rem_i32 of value * value * value
   | Mad_f32 of value * value * value * value
+  (* One-instruction float intrinsics. Pure and opaque: value numbering may
+     drop a redundant one, nothing rewrites one. See [Gpu_type.unary_f32]. *)
+  | Unary_f32 of value * Gpu_type.unary_f32 * value
+  | Binary_f32 of value * Gpu_type.binary_f32 * value * value
+  | F32_of_i32 of value * value
   (* Addressing and global memory *)
   | Gep_f32 of value * value * value
   | Load_f32 of value * value
@@ -81,8 +86,10 @@ type instr =
   | Wgmma_fence
   (* Pack a GMMA shared descriptor ([dst] : u64). Fields are producer policy. *)
   | Gmma_descriptor of value * value * value * gmma_fields
-  (* In-place [acc] += A_desc @ B_desc (TF32 inputs, f32 accumulate). *)
-  | Wgmma_mma_tf32 of value list * value * value * int * bool
+  (* In-place [acc] += A_desc @ B_desc, f32 accumulate. The dtype is the
+     shared operands' element type and chooses the instruction: Float32 reads
+     them as tf32 with K=8, Bfloat16/Float16 with K=16. *)
+  | Wgmma_mma of Gpu_type.dtype * value list * value * value * int * bool
   | Wgmma_commit_group
   | Wgmma_wait_group of int
   (* Shared memory *)
@@ -147,6 +154,7 @@ let results = function
   | Const_i32 (v, _) | Const_f32 (v, _) | Thread_idx_x v | Global_idx_x v
   | Block_idx_x v | Block_idx_y v | Gep_f32 (v, _, _) -> [v]
   | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _) | Mad_f32 (v, _, _, _) | Div_i32 (v, _, _) | Rem_i32 (v, _, _) | Min_i32 (v, _, _)
+  | Unary_f32 (v, _, _) | Binary_f32 (v, _, _, _) | F32_of_i32 (v, _)
   | Load_f32 (v, _) | Load_f32_masked (v, _, _, _)
   | Shared_alloc v | Shared_load_f32 (v, _, _) | Load_tensor (v, _) | Load_tensor_masked (v, _, _, _) -> [v]
   | Load_f32x4 (a, b, c, d, _) | Shared_load_f32x4 (a, b, c, d, _, _) -> [a; b; c; d]
@@ -163,7 +171,7 @@ let results = function
   | Mbarrier_init _ | Mbarrier_arrive_expect_tx _ | Mbarrier_arrive _
   | Mbarrier_try_wait_parity _
   | Tma_load_2d _ | Fence_proxy_async
-  | Wgmma_fence | Wgmma_mma_tf32 _ | Wgmma_commit_group | Wgmma_wait_group _
+  | Wgmma_fence | Wgmma_mma _ | Wgmma_commit_group | Wgmma_wait_group _
   | Return _ | For _ -> []
   | Gmma_descriptor (dst, _, _, _) -> [dst]
 let operands = function
@@ -175,6 +183,8 @@ let operands = function
   | Gep_f32 (_, p, ix) -> [p; ix]
   | Add_i32 (_, a, b) | Add_f32 (_, a, b) | Mul_f32 (_, a, b) -> [a; b]
   | Mad_f32 (_, a, b, c) -> [a; b; c]
+  | Unary_f32 (_, _, a) | F32_of_i32 (_, a) -> [a]
+  | Binary_f32 (_, _, a, b) -> [a; b]
   | Load_f32 (_, p) -> [p] | Load_f32_masked (_, p, ix, n) -> [p; ix; n]
   | Load_f32x4 (_, _, _, _, p) -> [p]
   | Store_f32 (p, v) -> [p; v] | Store_f32_masked (p, v, ix, n) -> [p; v; ix; n]
@@ -198,7 +208,7 @@ let operands = function
       smem :: index :: tmap :: c0 :: c1 :: mbar :: Option.to_list pred
   | Wgmma_fence | Wgmma_commit_group | Wgmma_wait_group _ -> []
   | Gmma_descriptor (_, smem, index, _) -> [smem; index]
-  | Wgmma_mma_tf32 (acc, desc_a, desc_b, _, _) ->
+  | Wgmma_mma (_, acc, desc_a, desc_b, _, _) ->
       acc @ [desc_a; desc_b]
   | Load_tensor (_, src) -> [src]
   | Load_tensor_masked (_, src, rows, cols) -> [src; rows; cols]
@@ -238,6 +248,9 @@ let rec map_uses replace = function
   | Add_f32 (dst,a,b) -> Add_f32(dst,replace a,replace b)
   | Mul_f32 (dst,a,b) -> Mul_f32(dst,replace a,replace b)
   | Mad_f32 (dst,a,b,c) -> Mad_f32(replace dst,replace a,replace b,replace c)
+  | Unary_f32 (dst,op,a) -> Unary_f32(dst,op,replace a)
+  | F32_of_i32 (dst,a) -> F32_of_i32(dst,replace a)
+  | Binary_f32 (dst,op,a,b) -> Binary_f32(dst,op,replace a,replace b)
   | Div_i32 (dst,a,b) -> Div_i32(dst,replace a,replace b)
   | Min_i32 (dst,a,b) -> Min_i32(dst,replace a,replace b)
   | Rem_i32 (dst,a,b) -> Rem_i32(dst,replace a,replace b)
@@ -282,8 +295,9 @@ let rec map_uses replace = function
         , replace mbar, Option.map replace pred )
   | Gmma_descriptor (dst, smem, index, fields) ->
       Gmma_descriptor (dst, replace smem, replace index, fields)
-  | Wgmma_mma_tf32 (acc, desc_a, desc_b, n, scale_d) ->
-      Wgmma_mma_tf32 (List.map replace acc, replace desc_a, replace desc_b, n, scale_d)
+  | Wgmma_mma (element, acc, desc_a, desc_b, n, scale_d) ->
+      Wgmma_mma
+        (element, List.map replace acc, replace desc_a, replace desc_b, n, scale_d)
   | Load_tensor (dst,src) -> Load_tensor(dst,replace src)
   | Load_tensor_masked (dst,src,rows,cols) ->
       Load_tensor_masked(dst,replace src,replace rows,replace cols)

@@ -28,7 +28,8 @@ ptxas -arch=sm_90 /tmp/oxgpu-dot-product.ptx -o /tmp/oxgpu-dot-product.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-unique-reuse.ptx -o /tmp/oxgpu-unique-reuse.cubin
 ptxas -arch=sm_90 /tmp/oxgpu-alias-reuse-aliased.ptx -o /tmp/oxgpu-alias-reuse-aliased.cubin
 for kernel in guarded_saxpy short_circuit numeric float_compare uniform_branch \
-  joined_reduction rounding block_sum block_max; do
+  joined_reduction rounding block_sum block_max softmax_256 rms_norm_256 \
+  float_extremes; do
   dune exec test/emit_ptx.exe -- "$metadata_dir/$kernel.gpu" > "$metadata_dir/$kernel.ptx"
   ptxas -arch=sm_90 "$metadata_dir/$kernel.ptx" -o "$metadata_dir/$kernel.cubin"
 done

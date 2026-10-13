@@ -25,17 +25,60 @@ and func = {
 type state = {
   mutable next : int;
   mutable body : K.instruction list;
-  (* Inlining depth, so a recursion the base case never folds away fails with
-     a source location instead of running the adapter out of stack. *)
+  (* Inlining depth, so a recursion whose base case never folds fails with a
+     source location instead of running the adapter out of stack. *)
   mutable depth : int;
+  (* Total operations emitted. Depth alone does not bound the work: a tree
+     recursion with a constant bound stays shallow while inlining
+     exponentially many calls, and a nest of constant loops multiplies
+     without any single loop exceeding its own limit. This counts what
+     actually grows. *)
+  mutable emitted : int;
+  (* Structural recursion depth of [expression]. Deeply nested expressions
+     emit almost nothing, so the operation budget cannot see them, and
+     catching Stack_overflow in native code is not dependable. Count instead. *)
+  mutable nesting : int;
 }
 
-(* Matches the constant-loop unroll limit: a recursion driven by compile-time
-   constants is the same thing written differently. *)
-let max_inline_depth = 64
+(* Limits on compile-time evaluation, overridable like a compiler flag.
+
+   These are not a style policy. A kernel that is expensive on purpose is the
+   author's business, the same way a C++ compiler will happily instantiate a
+   template that produces a megabyte of code. What a compiler does owe is
+   termination and a diagnostic instead of a crash, so each limit below
+   answers one of those and nothing else:
+
+   - depth, because a recursion whose base case never folds does not
+     terminate, and that is the compiler's problem rather than the author's;
+   - nesting, because exhausting the adapter's own stack gives an uncatchable
+     runtime error with no source location at all;
+   - operations, as a runaway backstop only. The default matches gcc's
+     -fconstexpr-ops-limit, so anything an author wrote deliberately fits and
+     only genuine exponential blowup trips it.
+
+   For comparison: clang -fconstexpr-depth 512, -fbracket-depth 256,
+   -fconstexpr-steps 1048576; gcc -fconstexpr-ops-limit 33554432;
+   rustc recursion_limit 128. Tight on depth, generous on operations. *)
+let env_int name default =
+  match Sys.getenv_opt name with
+  | Some text -> (try int_of_string text with _ -> default)
+  | None -> default
+
+let max_inline_depth = env_int "OXGPU_MAX_INLINE_DEPTH" 64
+let max_emitted_operations = env_int "OXGPU_MAX_OPERATIONS" 33554432
+let max_expression_nesting = env_int "OXGPU_MAX_NESTING" 8192
 
 let fresh s = let n = s.next in s.next <- n + 1; n
-let emit s exp op = s.body <- K.instruction ~loc:(span exp.exp_loc) op :: s.body
+let emit s exp op =
+  if s.emitted >= max_emitted_operations then
+    fail exp.exp_loc
+      (Printf.sprintf
+         "kernel exceeded %d compile-time operations (OXGPU_MAX_OPERATIONS); \
+          a recursion with exponential breadth inlines without bound even \
+          while its depth stays small"
+         max_emitted_operations);
+  s.emitted <- s.emitted + 1;
+  s.body <- K.instruction ~loc:(span exp.exp_loc) op :: s.body
 let full_range = Some (-2147483648L, 2147483647L)
 
 let get env exp path = match path with
@@ -132,6 +175,18 @@ let function_params loc params =
 let unroll_bounds = 64
 
 let rec expression s env exp =
+  if s.nesting >= max_expression_nesting then
+    fail exp.exp_loc
+      (Printf.sprintf
+         "expression nested deeper than %d (OXGPU_MAX_NESTING); split the \
+          kernel into smaller definitions"
+         max_expression_nesting);
+  s.nesting <- s.nesting + 1;
+  let traced = expression_node s env exp in
+  s.nesting <- s.nesting - 1;
+  traced
+
+and expression_node s env exp =
   let const op range =
     let d = fresh s in
     emit s exp (op d);
@@ -260,6 +315,14 @@ let rec expression s env exp =
       (match op with
        | "shared" | "shared_wgmma" ->
            let layout = if op = "shared_wgmma" then `Wgmma else `Plain in
+           (* The tile's element type is read off the allocation's own type,
+              which inference has already pinned from how the tile is used —
+              normally the typed tensor_map that fills it. *)
+           let element =
+             match kind exp.exp_env exp.exp_loc exp.exp_type with
+             | T.Shared element -> element
+             | _ -> fail exp.exp_loc "shared allocation must have a tile type"
+           in
            (match labelled exp.exp_loc ~required:["rows"; "cols"] xs with
             | [rows; cols], unit_arg ->
                 (match unit_arg with
@@ -268,7 +331,7 @@ let rec expression s env exp =
                 let rows = const_extent rows.exp_loc (expression s env rows) in
                 let cols = const_extent cols.exp_loc (expression s env cols) in
                 let d = fresh s in
-                emit s exp (K.Shared_alloc (d, rows, cols, layout));
+                emit s exp (K.Shared_alloc (d, rows, cols, element, layout));
                 Shared (K.Value d)
             | _ -> fail exp.exp_loc "shared expects ~rows and ~cols")
        | "wgmma_acc" ->
@@ -297,7 +360,7 @@ let rec expression s env exp =
                 let ix, _ = scalar index.exp_loc (expression s env index) in
                 result (fun d -> K.Gmma_descriptor (d, m, ix))
             | _ -> fail exp.exp_loc "gmma_descriptor expects a shared tile and an element offset")
-       | "wgmma_mma_tf32" ->
+       | "wgmma_mma" ->
            let labs, _ = labelled exp.exp_loc ~required:["n"; "scale"] xs in
            let positionals =
              List.filter_map
@@ -306,6 +369,16 @@ let rec expression s env exp =
            in
            (match positionals, labs with
             | [acc; da; db], [n; scale] ->
+                (* One name, and the operands' element type picks the
+                   instruction. The OCaml type already forced A and B to
+                   agree, so reading either descriptor is enough. *)
+                let element =
+                  match kind da.exp_env da.exp_loc da.exp_type with
+                  | T.Gmma_desc element -> element
+                  | _ ->
+                      fail da.exp_loc
+                        "wgmma_mma operands must come from Gpu.gmma_descriptor"
+                in
                 let ids = wgmma_acc acc.exp_loc (expression s env acc) in
                 let da, _ = scalar da.exp_loc (expression s env da) in
                 let db, _ = scalar db.exp_loc (expression s env db) in
@@ -319,9 +392,9 @@ let rec expression s env exp =
                        | _ -> fail scale.exp_loc "scale must be true or false")
                   | _ -> fail scale.exp_loc "scale must be true or false"
                 in
-                emit s exp (K.Wgmma_mma_tf32 (ids, da, db, n, scale));
+                emit s exp (K.Wgmma_mma (element, ids, da, db, n, scale));
                 Void
-            | _ -> fail exp.exp_loc "wgmma_mma_tf32 expects acc, desc_a, desc_b, ~n, ~scale")
+            | _ -> fail exp.exp_loc "wgmma_mma expects acc, desc_a, desc_b, ~n, ~scale")
        (* Which warpgroup the calling thread is in. 128 is the warpgroup
           width, a hardware constant, so the division belongs here. *)
        | "warpgroup_index" ->
@@ -552,6 +625,29 @@ let rec expression s env exp =
                 unit u.exp_loc (expression s env u);
                 emit s exp K.Cp_async_wait_all;
                 Void
+            | "float_of_int", [a] ->
+                let a, _ = scalar a.exp_loc (expression s env a) in
+                result (fun d -> K.F32_of_i32 (d, a))
+            | ( "rsqrt_approx" | "exp2_approx" | "log2_approx" | "tanh_approx"
+              | "recip_approx" | "sqrt" | "abs_float" | "~-." ), [a] ->
+                let op =
+                  match op with
+                  | "rsqrt_approx" -> G.Rsqrt_approx
+                  | "exp2_approx" -> G.Exp2_approx
+                  | "log2_approx" -> G.Log2_approx
+                  | "tanh_approx" -> G.Tanh_approx
+                  | "recip_approx" -> G.Recip_approx
+                  | "sqrt" -> G.Sqrt
+                  | "abs_float" -> G.Absolute
+                  | _ -> G.Negate
+                in
+                let a, _ = scalar a.exp_loc (expression s env a) in
+                result (fun d -> K.Unary_f32 (d, op, a))
+            | ("float_max" | "float_min"), [a; b] ->
+                let op = if op = "float_max" then G.Maximum else G.Minimum in
+                let a, _ = scalar a.exp_loc (expression s env a) in
+                let b, _ = scalar b.exp_loc (expression s env b) in
+                result (fun d -> K.Binary_f32 (d, op, a, b))
             | "mad_f32", [acc; a; b] ->
                 let acc, _ = scalar acc.exp_loc (expression s env acc) in
                 let a, _ = scalar a.exp_loc (expression s env a) in
@@ -653,7 +749,7 @@ let rec expression s env exp =
                 emit s exp (K.Wgmma_wait_group n);
                 Void
             | ("i32_of_int" | "i32_to_int"), [v] -> expression s env v
-            | ( "+." | "*." | "+" | "-" | "*" | "/" | "i32_add" | "i32_sub" | "i32_mul"
+            | ( "+." | "*." | "-." | "/." | "+" | "-" | "*" | "/" | "i32_add" | "i32_sub" | "i32_mul"
               | "i32_div" | "i32_rem" | "=" | "<>" | "<" | "<=" | ">" | ">=" )
               , [a; b] ->
                 let av, ar = scalar a.exp_loc (expression s env a) in
@@ -697,6 +793,8 @@ let rec expression s env exp =
                 (match op with
                  | "+." -> result (fun d -> K.Add_f32 (d, av, bv))
                  | "*." -> result (fun d -> K.Mul_f32 (d, av, bv))
+                 | "-." -> result (fun d -> K.Binary_f32 (d, G.Subtract, av, bv))
+                 | "/." -> result (fun d -> K.Binary_f32 (d, G.Divide, av, bv))
                  | "+" | "-" | "*" | "i32_add" | "i32_sub" | "i32_mul" | "i32_div"
                  | "i32_rem" ->
                      let range =
@@ -733,8 +831,7 @@ let rec expression s env exp =
                        range
                  | _ ->
                      let k = kind a.exp_env a.exp_loc a.exp_type in
-                     if k = Buffer || k = Unit || k = Shared || k = Mbarrier
-                        || k = Tensor_map then
+                     if not (T.is_scalar k) then
                        fail exp.exp_loc "only scalar comparisons are supported";
                      let c =
                        match op with
@@ -883,8 +980,9 @@ and local_apply s env exp callee xs =
            if s.depth >= max_inline_depth then
              fail exp.exp_loc
                (Printf.sprintf
-                  "call nested deeper than %d; a recursion whose base case is \
-                   not a compile-time constant cannot be inlined"
+                  "call nested deeper than %d (OXGPU_MAX_INLINE_DEPTH); a \
+                   recursion whose base case is not a compile-time constant \
+                   cannot be inlined"
                   max_inline_depth);
            s.depth <- s.depth + 1;
            let value = expression s body_env fn.body in
@@ -961,8 +1059,10 @@ let elim_unused_consts instrs =
     | K.Add_i32 (_, a, b) | K.Sub_i32 (_, a, b) | K.Mul_i32 (_, a, b)
     | K.Min_i32 (_, a, b)
     | K.Div_i32 (_, a, b) | K.Rem_i32 (_, a, b) | K.Compare (_, _, a, b)
+    | K.Binary_f32 (_, _, a, b)
     | K.Add_f32 (_, a, b) | K.Mul_f32 (_, a, b) | K.Shared_load_f32 (_, a, b)
     | K.Store_f32 (a, b) -> atoms [a; b]
+    | K.Unary_f32 (_, _, a) | K.F32_of_i32 (_, a) -> note_atom a
     | K.Mad_f32 (_, a, b, c) | K.Load_f32_masked (_, a, b, c) ->
         atoms [a; b; c]
     | K.Store_f32_masked (a, b, c, d) -> atoms [a; b; c; d]
@@ -984,7 +1084,7 @@ let elim_unused_consts instrs =
     | K.Tma_load_2d (a, b, c, d, e, f, p) ->
         atoms [a; b; c; d; e; f]; note_opt p
     | K.Gmma_descriptor (_, a, b) -> atoms [a; b]
-    | K.Wgmma_mma_tf32 (ids, a, b, _, _) ->
+    | K.Wgmma_mma (_, ids, a, b, _, _) ->
         List.iter (fun id -> Hashtbl.replace used id ()) ids;
         atoms [a; b]
     | K.For (_, lo, limit, _, body) ->
@@ -1071,7 +1171,7 @@ let prior_functions target structure =
                   | Tpat_var { id; _ } ->
                       (match binding.vb_expr.exp_desc with
                        | Texp_function _ ->
-                           let scratch = { next = 0; body = []; depth = 0 } in
+                           let scratch = { next = 0; body = []; depth = 0; emitted = 0; nesting = 0 } in
                            (match expression scratch !env binding.vb_expr with
                             | Func _ as fn -> env := (id, fn) :: !env
                             | _ -> ())
@@ -1139,23 +1239,23 @@ let compile target structure =
             in
             let value =
               match k with
-              | Buffer -> Memory (K.Buffer_arg i)
-              | Tensor_map -> Tensor_map (K.Arg i)
+              | Buffer _ -> Memory (K.Buffer_arg i)
+              | Tensor_map _ -> Tensor_map (K.Arg i)
               | Unit -> fail loc "unit kernel argument unsupported"
-              | Shared | Mbarrier ->
+              | Shared _ | Mbarrier ->
                   fail loc "shared/mbarrier cannot be kernel formals"
               | Native_int | Int32 -> Scalar (K.Arg i, full_range)
-              | Int64 | Float | Boolean -> Scalar (K.Arg i, None)
+              | Int64 | Gmma_desc _ | Float | Boolean -> Scalar (K.Arg i, None)
               | Wgmma_acc -> fail loc "wgmma_acc cannot be a kernel formal"
             in
             param.fp_param, value)
           params
       in
-      let s = { next = 0; body = []; depth = 0 } in
+      let s = { next = 0; body = []; depth = 0; emitted = 0; nesting = 0 } in
       unit body.exp_loc (expression s env body);
       finish s
   | _ ->
-      let s = { next = 0; body = []; depth = 0 } in
+      let s = { next = 0; body = []; depth = 0; emitted = 0; nesting = 0 } in
       let fn =
         match expression s (prior_functions target structure) binding.vb_expr with
         | Func fn -> fn
@@ -1192,3 +1292,4 @@ let () =
   with Source_span.Error (loc, msg) ->
     prerr_endline (Source_span.to_string loc ^ ": " ^ msg);
     exit 2
+

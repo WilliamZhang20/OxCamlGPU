@@ -65,6 +65,16 @@ let pure_key state instruction =
   | Div_i32 (_, a, b) -> binary "div" (pair a b)
   | Min_i32 (_, a, b) -> binary "min" (sorted a b)
   | Rem_i32 (_, a, b) -> binary "rem" (pair a b)
+  (* The float intrinsics are pure too, and the approximate ones run on the
+     special-function unit at several cycles apiece, so a repeated [rsqrt] is
+     worth collapsing. Operands are not sorted even for max/min: PTX does not
+     specify which NaN payload survives, so the two orders are not provably
+     the same value. *)
+  | Unary_f32 (_, op, a) ->
+      Some (Printf.sprintf "%s(%d)" (Gpu_type.string_of_unary_f32 op) (id a))
+  | Binary_f32 (_, op, a, b) ->
+      binary (Gpu_type.string_of_binary_f32 op) (pair a b)
+  | F32_of_i32 (_, a) -> Some (Printf.sprintf "f32_of_i32(%d)" (id a))
   | _ -> None
 
 (* [Some ()] when the instruction was replaced by an earlier equal one. *)

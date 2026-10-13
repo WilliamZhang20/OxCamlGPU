@@ -56,3 +56,22 @@ fi
 
 echo "gpu_idle: using GPU $pick (util ${pick_util}%, ${pick_free} MiB free)" >&2
 export CUDA_VISIBLE_DEVICES="$pick"
+
+# The pick above is a snapshot. A neighbour can land on the chosen GPU partway
+# through a long run, and the numbers it contaminates look like a regression
+# rather than like contention — which has now happened twice. Call this after
+# each measurement so a contaminated result says so instead of being believed.
+gpu_still_idle() {
+  local what="${1:-measurement}"
+  local line other_pid_count
+  line="$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used \
+    --format=csv,noheader,nounits -i "$CUDA_VISIBLE_DEVICES")"
+  other_pid_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader \
+    -i "$CUDA_VISIBLE_DEVICES" | grep -c . || true)"
+  if (( other_pid_count > 0 )); then
+    echo "gpu_idle: WARNING another process is on GPU $CUDA_VISIBLE_DEVICES" >&2
+    echo "gpu_idle: $what may be contaminated: $line" >&2
+    return 1
+  fi
+  return 0
+}

@@ -89,6 +89,9 @@ let lower_unchecked kernel =
       | Mul_f32 (v,a,b) -> [Ptx_ir.Mul_f32(v,a,b)]
       | Mad_f32 (dst, a, b, c) ->
           [Ptx_ir.Mad_f32 (dst, a, b, c)]
+      | Unary_f32 (dst, op, a) -> [Ptx_ir.Unary_f32 (dst, op, a)]
+      | Binary_f32 (dst, op, a, b) -> [Ptx_ir.Binary_f32 (dst, op, a, b)]
+      | F32_of_i32 (dst, a) -> [Ptx_ir.F32_of_i32 (dst, a)]
       | Scale_tensor_f32 (v,a,b) -> [Ptx_ir.Tensor_scale_f32(v,a,b)]
       | Mul_tensor_f32 (v,a,b) -> [Ptx_ir.Tensor_mul_f32(v,a,b)]
       | Remap_tensor (dst, src) ->
@@ -128,8 +131,8 @@ let lower_unchecked kernel =
       | Gmma_descriptor (d, s, i, fields) ->
           [Ptx_ir.Gmma_descriptor (d, s, i, fields)]
       | Wgmma_fence -> [Ptx_ir.Wgmma_fence]
-      | Wgmma_mma_tf32 (acc,da,db,n,s) ->
-          [Ptx_ir.Wgmma_mma_tf32 (acc,da,db,n,s)]
+      | Wgmma_mma (element,acc,da,db,n,s) ->
+          [Ptx_ir.Wgmma_mma (element,acc,da,db,n,s)]
       | Wgmma_commit_group -> [Ptx_ir.Wgmma_commit_group]
       | Wgmma_wait_group n -> [Ptx_ir.Wgmma_wait_group n]
       | Load_tensor (v,p) -> [Ptx_ir.Tile_load_f32(v,p)]
@@ -264,7 +267,8 @@ let lower kernel =
     | Ptx_ir.Jump_uni _ | Ptx_ir.Move _
     | Ptx_ir.Barrier_cta -> ()
     | Ptx_ir.Const_i32 _ | Ptx_ir.Const_f32 _ | Ptx_ir.Add_i32 _ | Ptx_ir.Add_f32 _
-    | Ptx_ir.Mad_f32 _
+    | Ptx_ir.Mad_f32 _ | Ptx_ir.Unary_f32 _ | Ptx_ir.Binary_f32 _
+    | Ptx_ir.F32_of_i32 _
     | Ptx_ir.Thread_idx_x _ | Ptx_ir.Global_idx_x _ | Ptx_ir.Block_idx_x _ | Ptx_ir.Block_idx_y _
     | Ptx_ir.Gep_f32 _
     | Ptx_ir.Load_f32 _ | Ptx_ir.Load_f32_masked _ | Ptx_ir.Load_f32x4 _
@@ -275,7 +279,7 @@ let lower kernel =
     | Ptx_ir.Mbarrier_arrive _ | Ptx_ir.Mbarrier_try_wait_parity _
     | Ptx_ir.Mbarrier_slot _
     | Ptx_ir.Tma_load_2d _ | Ptx_ir.Fence_proxy_async
-    | Ptx_ir.Wgmma_fence | Ptx_ir.Wgmma_mma_tf32 _
+    | Ptx_ir.Wgmma_fence | Ptx_ir.Wgmma_mma _
     | Ptx_ir.Gmma_descriptor _
     | Ptx_ir.Wgmma_commit_group | Ptx_ir.Wgmma_wait_group _
     | Ptx_ir.Store_f32 _ | Ptx_ir.Store_f32x2 _ | Ptx_ir.Store_f32x4 _

@@ -53,6 +53,7 @@ dynamic_smem () {
 }
 run_matmul_bench () {
   local cubin="$1" size="$2" name="$3" bm="$4" bn="$5" bk="$6" threads="$7" smem="$8"
+  local element="${9:-f32}"
   "$python" bench/bench.py --skip-micro \
     --matmul-cubin "$cubin" \
     --matmul-name "$name" \
@@ -61,8 +62,12 @@ run_matmul_bench () {
     --matmul-bn "$bn" \
     --matmul-bk "$bk" \
     --matmul-threads "$threads" \
+    --matmul-element "$element" \
     --matmul-smem "$smem" \
     "${bench_args[@]}"
+  # A neighbour arriving mid-run looks exactly like a regression in the
+  # % cuBLAS column, so say so rather than letting the number stand.
+  gpu_still_idle "$name at $size" || true
 }
 emit_oxcaml_tile () {
   local name="$1"
@@ -90,5 +95,18 @@ else
     fi
     run_matmul_bench "$temp_dir/$name.cubin" "$size" "$name" "$bm" "$bn" "$bk" "$threads" \
       "$(dynamic_smem "$temp_dir/$name.ptx")"
+  done
+fi
+
+# The same schedule at bf16, against cuBLAS's bf16 path. BK is 64 because a
+# 128-byte swizzle period is 64 bf16 columns; the shared window is the same
+# number of bytes as the f32 tile. Skip with BENCH_BF16=0.
+if [[ "${BENCH_BF16:-1}" == 1 ]]; then
+  emit_oxcaml_tile gemm_bf16_fast
+  read -r bf16_threads bf16_smem _total < <(cd "$root" && \
+    dune exec test/emit_gemm_ptx.exe -- --info "$metadata_dir/gemm_bf16_fast.gpu")
+  for size in 4096 8192; do
+    run_matmul_bench "$temp_dir/gemm_bf16_fast.cubin" "$size" gemm_bf16_fast \
+      128 256 64 "$bf16_threads" "$bf16_smem" bf16
   done
 fi

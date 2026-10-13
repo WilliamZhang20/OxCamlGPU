@@ -255,5 +255,104 @@ int main(int argc, char **argv) {
     }
     puts("H100 recursive higher-order block reductions passed");
   }
+
+  /* The float intrinsics, in the two ops that need them. The tolerance is set
+     by the approximate units the source asked for by name: ex2, rcp and rsqrt
+     are each a couple of ulp, so this is a numerical check, not a bit check. */
+  {
+    const int rows = 4, cols = 256, count = rows * cols;
+    std::vector<float> host(count), got(count);
+    for (int i = 0; i < count; i++)
+      host[i] = (float)((i * 53 % 197) - 98) / 23.0f;
+    CUdeviceptr src, dst;
+    CUDA_CHECK(cuMemAlloc(&src, count * sizeof(float)));
+    CUDA_CHECK(cuMemAlloc(&dst, count * sizeof(float)));
+    CUDA_CHECK(cuMemcpyHtoD(src, host.data(), count * sizeof(float)));
+    for (int which = 0; which < 2; which++) {
+      const char *name = which == 0 ? "softmax_256" : "rms_norm_256";
+      CUDA_CHECK(cuModuleLoad(&module, (directory + "/" + name + ".cubin").c_str()));
+      CUDA_CHECK(cuModuleGetFunction(&function, module, name));
+      CUDA_CHECK(cuMemsetD32(dst, 0, count));
+      void *norm_args[] = {&src, &dst};
+      CUDA_CHECK(cuLaunchKernel(function, rows, 1, 1, cols, 1, 1, 0, NULL,
+                                norm_args, NULL));
+      CUDA_CHECK(cuCtxSynchronize());
+      CUDA_CHECK(cuMemcpyDtoH(got.data(), dst, count * sizeof(float)));
+      for (int r = 0; r < rows; r++) {
+        const float *row = host.data() + r * cols;
+        for (int c = 0; c < cols; c++) {
+          float want;
+          if (which == 0) {
+            float peak = row[0], total = 0.0f;
+            for (int i = 1; i < cols; i++) peak = fmaxf(peak, row[i]);
+            for (int i = 0; i < cols; i++) total += expf(row[i] - peak);
+            want = expf(row[c] - peak) / total;
+          } else {
+            float squares = 0.0f;
+            for (int i = 0; i < cols; i++) squares += row[i] * row[i];
+            want = row[c] / sqrtf(squares / (float)cols + 1e-6f);
+          }
+          if (fabsf(got[r * cols + c] - want) > 1e-4f * fmaxf(1.0f, fabsf(want))) {
+            fprintf(stderr, "%s row %d col %d: got %g want %g\n",
+                    name, r, c, got[r * cols + c], want);
+            return 13;
+          }
+        }
+      }
+      CUDA_CHECK(cuModuleUnload(module));
+    }
+    puts("H100 softmax and RMS norm float intrinsics passed");
+  }
+
+  /* Float.max/Float.min claim OCaml's meaning, and the claim is only
+     interesting at the edges. These are exact comparisons: max and min select
+     an operand, they do not compute one. */
+  {
+    const int pairs = 6;
+    const float nan_value = NAN;
+    float input[12] = {
+        nan_value, 1.0f,      /* nan on the left  */
+        1.0f, nan_value,      /* nan on the right */
+        nan_value, nan_value, /* both             */
+        -0.0f, 0.0f,          /* signed zero      */
+        0.0f, -0.0f,          /* and reversed     */
+        -1.5f, 2.5f,          /* ordinary         */
+    };
+    /* OCaml: max/min return nan if either argument is nan, and
+       max (-0.) (+0.) = +0. while min (-0.) (+0.) = -0. */
+    float want[12] = {
+        nan_value, nan_value,
+        nan_value, nan_value,
+        nan_value, nan_value,
+        0.0f, -0.0f,
+        0.0f, -0.0f,
+        2.5f, -1.5f,
+    };
+    CUdeviceptr src, dst;
+    CUDA_CHECK(cuMemAlloc(&src, sizeof input));
+    CUDA_CHECK(cuMemAlloc(&dst, sizeof input));
+    CUDA_CHECK(cuMemcpyHtoD(src, input, sizeof input));
+    CUDA_CHECK(cuMemsetD8(dst, 0, sizeof input));
+    CUDA_CHECK(cuModuleLoad(&module, (directory + "/float_extremes.cubin").c_str()));
+    CUDA_CHECK(cuModuleGetFunction(&function, module, "float_extremes"));
+    void *extreme_args[] = {&src, &dst};
+    CUDA_CHECK(cuLaunchKernel(function, 1, 1, 1, pairs, 1, 1, 0, NULL,
+                              extreme_args, NULL));
+    CUDA_CHECK(cuCtxSynchronize());
+    float got[12];
+    CUDA_CHECK(cuMemcpyDtoH(got, dst, sizeof got));
+    for (int i = 0; i < 2 * pairs; i++) {
+      int ok = isnan(want[i]) ? isnan(got[i])
+                              : got[i] == want[i] &&
+                                    signbit(got[i]) == signbit(want[i]);
+      if (!ok) {
+        fprintf(stderr, "float_extremes[%d]: got %g (sign %d) want %g (sign %d)\n",
+                i, got[i], signbit(got[i]), want[i], signbit(want[i]));
+        return 14;
+      }
+    }
+    CUDA_CHECK(cuModuleUnload(module));
+    puts("H100 Float.max/Float.min NaN and signed-zero semantics passed");
+  }
   return 0;
 }

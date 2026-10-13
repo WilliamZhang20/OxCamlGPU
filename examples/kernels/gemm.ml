@@ -15,7 +15,7 @@
    [schedule]'s parameters are the kernel's arguments, and their types carry
    OxCaml modes that the compiler checks and turns into GPU facts:
 
-     a_tmap, b_tmap : tensor_map @ aliased read
+     a_tmap, b_tmap : float tensor_map @ aliased read
        A TMA descriptor, the CUtensorMap the host builds to describe a global
        tensor and the tile shape to copy out of it. [cp.async.bulk.tensor]
        reads it. [aliased] says other references to it may exist, [read] says
@@ -47,8 +47,8 @@ open Gpu_dsl
 let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m =
   let consumers = 128 * (bm / 64) in
   let schedule
-      (a_tmap : tensor_map @ aliased read)
-      (b_tmap : tensor_map @ aliased read)
+      (a_tmap : float tensor_map @ aliased read)
+      (b_tmap : float tensor_map @ aliased read)
       (c : float gpu_array @ unique read_write)
       (m_dim : int) (n_dim : int) (k : int) =
     let a_sm = Gpu.shared_wgmma ~rows:(stages_n * bm) ~cols:bk () in
@@ -120,7 +120,7 @@ let hopper_gemm ~bm ~bn ~bk ~stages_n ~group_m =
         (* Accumulators start at 0, so scale accumulates on every K-slice. *)
         for ki = 0 to bk / 8 - 1 do
           let off = 8 * ki in
-          Gpu.wgmma_mma_tf32 acc
+          Gpu.wgmma_mma acc
             (Gpu.gmma_descriptor a_sm (a_base +: off))
             (Gpu.gmma_descriptor b_sm (b_base +: off))
             ~n:bn ~scale:true

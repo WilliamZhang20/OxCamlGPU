@@ -135,6 +135,45 @@ expect_tile () {
     exit 1
   fi
 }
+# Every float intrinsic reaches exactly the instruction its name promises:
+# the Stdlib names round, the [_approx] names are the special-function unit.
+run_ptx_emitter "$tmpdir/float_math.gpu" > "$tmpdir/float_math.ptx"
+for instruction in 'neg\.f32' 'abs\.f32' 'sqrt\.rn\.f32' 'sub\.rn\.f32' \
+  'div\.rn\.f32' 'max\.NaN\.f32' 'min\.NaN\.f32' 'cvt\.rn\.f32\.s32' \
+  'ex2\.approx\.f32' 'lg2\.approx\.f32' 'tanh\.approx\.f32' \
+  'rsqrt\.approx\.f32' 'rcp\.approx\.f32'; do
+  if ! rg -q "$instruction" "$tmpdir/float_math.ptx"; then
+    echo "float_math: no $instruction in the emitted PTX" >&2
+    exit 1
+  fi
+done
+# The intrinsics are pure, so value numbering must collapse the repeats:
+# three [abs_float b] and two [abs_float a] are two instructions, not five.
+if [[ $(rg -c 'abs\.f32' "$tmpdir/float_math.ptx") != 2 ]]; then
+  echo "float_math: redundant float intrinsics were not eliminated" >&2
+  exit 1
+fi
+
+# The [.NaN] modifier is the whole of the claim that Float.max keeps its OCaml
+# meaning, so it is checked on its own; run_h100.cu verifies the behaviour.
+run_ptx_emitter "$tmpdir/float_extremes.gpu" > "$tmpdir/float_extremes.ptx"
+rg -q 'max\.NaN\.f32' "$tmpdir/float_extremes.ptx"
+rg -q 'min\.NaN\.f32' "$tmpdir/float_extremes.ptx"
+
+# A row softmax is the exponential, the maximum and the reciprocal together;
+# RMS norm is the reciprocal square root and the one int-to-float conversion.
+run_ptx_emitter "$tmpdir/softmax_256.gpu" > "$tmpdir/softmax_256.ptx"
+rg -q 'ex2\.approx\.f32' "$tmpdir/softmax_256.ptx"
+rg -q 'rcp\.approx\.f32' "$tmpdir/softmax_256.ptx"
+rg -q 'sub\.rn\.f32' "$tmpdir/softmax_256.ptx"
+if [[ $(rg -c 'max\.NaN\.f32' "$tmpdir/softmax_256.ptx") != 8 ]]; then
+  echo "softmax_256: the maximum should inline once per fold step" >&2
+  exit 1
+fi
+run_ptx_emitter "$tmpdir/rms_norm_256.gpu" > "$tmpdir/rms_norm_256.ptx"
+rg -q 'rsqrt\.approx\.f32' "$tmpdir/rms_norm_256.ptx"
+rg -q 'cvt\.rn\.f32\.s32' "$tmpdir/rms_norm_256.ptx"
+
 rg -q $'^arg\t0\ttensor_map\taliased\tglobal\tnonportable\tread\t' "$tmpdir/gemm_fast.gpu"
 rg -q $'^arg\t2\tbuffer_f32\tunique\tglobal\tnonportable\tread_write\t' "$tmpdir/gemm_fast.gpu"
 expect_tile gemm_fast 288 256 64
@@ -146,6 +185,42 @@ expect_tile gemm_bm64_bn256_s3 160 256 64
 expect_tile gemm_bm64_bn256_s2 160 256 64
 expect_tile gemm_bm256_bn128_s3 544 128 32
 expect_tile gemm_bm256_bn128_s2 544 128 32
+# bf16 is the same schedule at the other input width. The element type is
+# what picks the instruction, and because a swizzle period is 128 bytes at
+# either width the shared window comes out byte-identical — which is the
+# claim worth pinning, since it is what makes the two tiles interchangeable.
+rg -q $'^arg\t0\ttensor_map\taliased\tglobal\tnonportable\tread\t' \
+  "$tmpdir/gemm_bf16_fast.gpu"
+rg -q $'^body\tshared_alloc\t[0-9]+\t512\t64\tbf16\twgmma$' "$tmpdir/gemm_bf16_fast.gpu"
+rg -q $'^threads\t288$' "$tmpdir/gemm_bf16_fast.gpu"
+run_ptx_emitter "$tmpdir/gemm_bf16_fast.gpu" > "$tmpdir/gemm_bf16_fast.ptx"
+rg -q 'wgmma\.mma_async\.sync\.aligned\.m64n256k16\.f32\.bf16\.bf16' \
+  "$tmpdir/gemm_bf16_fast.ptx"
+if [[ $(rg -c 'wgmma\.mma_async' "$tmpdir/gemm_bf16_fast.ptx") != 4 ]]; then
+  echo "gemm_bf16_fast: expected 4 wgmma instructions" >&2
+  exit 1
+fi
+if [[ $(rg -c 'st\.global\.v2\.f32' "$tmpdir/gemm_bf16_fast.ptx") != 64 ]]; then
+  echo "gemm_bf16_fast: expected 64 vectorized epilogue stores" >&2
+  exit 1
+fi
+if rg -q 'st\.global\.f32' "$tmpdir/gemm_bf16_fast.ptx"; then
+  echo "gemm_bf16_fast: epilogue left an unvectorized scalar store" >&2
+  exit 1
+fi
+f32_window="$(run_matmul_emitter --info "$tmpdir/gemm_fast.gpu" | cut -d" " -f3)"
+bf16_window="$(run_matmul_emitter --info "$tmpdir/gemm_bf16_fast.gpu" | cut -d" " -f3)"
+if [[ "$f32_window" != "$bf16_window" ]]; then
+  echo "shared window differs across widths: f32 $f32_window, bf16 $bf16_window" >&2
+  exit 1
+fi
+
+# f16 picks the same k16 shape as bf16 and differs only in the suffix.
+rg -q $'^body\tshared_alloc\t[0-9]+\t64\t64\tf16\twgmma$' "$tmpdir/f16_wgmma.gpu"
+run_ptx_emitter "$tmpdir/f16_wgmma.gpu" > "$tmpdir/f16_wgmma.ptx"
+rg -q 'wgmma\.mma_async\.sync\.aligned\.m64n8k16\.f32\.f16\.f16' \
+  "$tmpdir/f16_wgmma.ptx"
+
 choose_4096="$(run_matmul_emitter --print-choose 4096 4096 4096)"
 choose_8192="$(run_matmul_emitter --print-choose 8192 8192 8192)"
 choose_64="$(run_matmul_emitter --print-config 'bm=64,bn=256,bk=32,stages=2,producers=32,threads=160')"

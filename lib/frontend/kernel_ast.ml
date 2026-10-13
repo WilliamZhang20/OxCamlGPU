@@ -57,10 +57,18 @@ type operation =
   | Add_f32 of int * atom * atom
   | Mul_f32 of int * atom * atom
   | Mad_f32 of int * atom * atom * atom
+  (* One-instruction float intrinsics; see [Gpu_type.unary_f32]. *)
+  | Unary_f32 of int * unary_f32 * atom
+  | Binary_f32 of int * binary_f32 * atom * atom
+  (* [float_of_int]: the one conversion a shape-parameterized kernel needs,
+     to turn an extent into a scale factor. *)
+  | F32_of_i32 of int * atom
   | Warp_reduce_sum_f32 of int * atom
   | Store_grid_leader_f32 of memory * atom
-  (* CTA shared: [dst] is MemRef(rows×cols,f32,Shared); extents are static. *)
-  | Shared_alloc of int * int * int * [`Plain | `Wgmma]
+  (* CTA shared: [dst] is MemRef(rows×cols,dtype,Shared); extents are static.
+     The dtype sets the tile's element width, which is what the swizzle period,
+     the GMMA descriptor stride and shared addressing all read. *)
+  | Shared_alloc of int * int * int * dtype * [`Plain | `Wgmma]
   | Shared_load_f32 of int * atom * atom
   | Shared_load_f32x4 of int * int * int * int * atom * atom
   | Shared_store_f32 of atom * atom * atom
@@ -82,7 +90,9 @@ type operation =
   | Fence_proxy_async
   | Wgmma_fence
   | Gmma_descriptor of int * atom * atom
-  | Wgmma_mma_tf32 of int list * atom * atom * int * bool
+  (* The leading dtype is the shared operands' element type, and it selects
+     the instruction: Float32 is tf32 k8, Bfloat16/Float16 are k16. *)
+  | Wgmma_mma of dtype * int list * atom * atom * int * bool
   | Wgmma_commit_group
   | Wgmma_wait_group of int
   (** Inclusive OCaml [for] with step 1 is lowered to exclusive [Ir.For]

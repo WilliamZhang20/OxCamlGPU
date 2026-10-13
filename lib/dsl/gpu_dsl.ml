@@ -1,9 +1,16 @@
 type 'a gpu_array = 'a array
 type 'a gpu_shared = 'a array
 type gpu_mbarrier = int array
-(* Host stub only — device lowering never materializes this. *)
-type tensor_map = int64
+(* Host stub only — device lowering never materializes these. *)
+type 'a tensor_map = int64
+type 'a gmma_desc = int64
 type wgmma_acc = float array
+
+(* Element tags. [float] is the f32 tag, so an f32 kernel names no tag at all;
+   these name the two narrow widths, which have no OCaml scalar because no
+   register ever holds one. *)
+type bf16
+type f16
 
 (* 32-bit wrapping index arithmetic, at the top level so an [open Gpu_dsl]
    makes it infix. Plain [+]/[*] stay range-checked: the adapter proves they
@@ -39,7 +46,7 @@ module Gpu = struct
     = "gpu_store_f32x4"
 
   external shared : rows:int -> cols:int -> unit -> float gpu_shared = "gpu_shared_alloc_f32"
-  external shared_wgmma : rows:int -> cols:int -> unit -> float gpu_shared = "gpu_shared_alloc_wgmma_f32"
+  external shared_wgmma : rows:int -> cols:int -> unit -> 'a gpu_shared = "gpu_shared_alloc_wgmma"
   external shared_load : float gpu_shared -> int -> float = "gpu_shared_load_f32"
   external shared_load_f32x4 :
     float gpu_shared -> int -> float * float * float * float
@@ -56,6 +63,12 @@ module Gpu = struct
   external cp_async_commit : unit -> unit = "gpu_cp_async_commit"
   external cp_async_wait : unit -> unit = "gpu_cp_async_wait"
   external mad_f32 : float -> float -> float -> float = "gpu_mad_f32"
+
+  external rsqrt_approx : float -> float = "gpu_rsqrt_approx"
+  external exp2_approx : float -> float = "gpu_exp2_approx"
+  external log2_approx : float -> float = "gpu_log2_approx"
+  external tanh_approx : float -> float = "gpu_tanh_approx"
+  external recip_approx : float -> float = "gpu_recip_approx"
 
   external warp_sum_f32 : float -> float = "gpu_warp_sum_f32"
   external store_grid_leader : float gpu_array @ unique write -> float -> unit = "gpu_store_grid_leader_f32"
@@ -74,10 +87,10 @@ module Gpu = struct
   external mbarrier_try_wait_parity : gpu_mbarrier -> int -> unit = "gpu_mbarrier_try_wait_parity"
 
   external tma_load_2d :
-    float gpu_shared -> int -> tensor_map @ aliased read ->
+    'a gpu_shared -> int -> 'a tensor_map @ aliased read ->
     int -> int -> gpu_mbarrier -> unit = "gpu_tma_load_2d"
   external tma_load_2d_elect :
-    float gpu_shared -> int -> tensor_map @ aliased read ->
+    'a gpu_shared -> int -> 'a tensor_map @ aliased read ->
     int -> int -> gpu_mbarrier -> bool -> unit = "gpu_tma_load_2d_elect"
   external fence_proxy_async : unit -> unit = "gpu_fence_proxy_async"
 
@@ -86,11 +99,11 @@ module Gpu = struct
   external wgmma_acc_get : wgmma_acc -> int -> float = "gpu_wgmma_acc_get"
   external wgmma_acc_row : wgmma_acc -> int -> int = "gpu_wgmma_acc_row"
   external wgmma_acc_col : wgmma_acc -> int -> int = "gpu_wgmma_acc_col"
-  external gmma_descriptor : float gpu_shared -> int -> int64
+  external gmma_descriptor : 'a gpu_shared -> int -> 'a gmma_desc
     = "gpu_gmma_descriptor"
-  external wgmma_mma_tf32 :
-    wgmma_acc -> int64 -> int64 -> n:int -> scale:bool -> unit
-    = "gpu_wgmma_mma_tf32"
+  external wgmma_mma :
+    wgmma_acc -> 'a gmma_desc -> 'a gmma_desc -> n:int -> scale:bool -> unit
+    = "gpu_wgmma_mma"
   external wgmma_commit_group : unit -> unit = "gpu_wgmma_commit_group"
   external wgmma_wait_group : int -> unit = "gpu_wgmma_wait_group"
 end

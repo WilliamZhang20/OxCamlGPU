@@ -629,4 +629,28 @@ let () =
   in
   if count "add.u32" (Compiler.compile_ptx commuted) <> 1 then
     failwith "commuted integer operands must share one value number";
+  (* A GMMA descriptor erases its tile's element type to u64, so the IR must
+     check for itself that the instruction reads the width the tile holds. The
+     source type system also prevents this; the verifier does not get to
+     assume the source was involved. *)
+  let wgmma_of ~tile_dtype ~instruction_dtype =
+    let wgmma_layout =
+      Layout.Shared {vector_width=1;order=[1;0];swizzle=Layout.Swizzle_128B} in
+    let cols = 128 / Gpu_type.dtype_storage_bytes tile_dtype in
+    let tile=make_value ~permission:Read_write ~layout:wgmma_layout 400
+        (MemRef([Static 64;Static cols],tile_dtype,Gpu_type.Shared))
+    and zero=integer 401
+    and desc=make_value 402 U64
+    and acc=List.init 4 (fun i -> make_value (410 + i) F32) in
+    { name="wgmma_width"; args=[];
+      body=[Shared_alloc tile; Const_i32 (zero, 0);
+            Gmma_descriptor (desc, tile, zero, {leading=1;stride=64;layout_type=1})]
+           @ List.map (fun v -> Const_f32 (v, 0.)) acc
+           @ [Wgmma_mma (instruction_dtype, acc, desc, desc, 8, true)];
+      threads_per_cta=Some 128 }
+  in
+  expect_ok (Verifier.verify_kernel
+    (wgmma_of ~tile_dtype:Bfloat16 ~instruction_dtype:Bfloat16));
+  expect_error "E_WGMMA_TYPE" (Verifier.verify_kernel
+    (wgmma_of ~tile_dtype:Float32 ~instruction_dtype:Bfloat16));
   print_endline "verifier semantic tests passed"

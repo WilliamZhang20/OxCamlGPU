@@ -149,7 +149,12 @@ let physicalize target =
           let count=tensor_register_count semantic in
           List.init count (fun index ->
             let scalar_ty=match dtype with
-              | Gpu_type.Float32 -> Gpu_type.F32 | Gpu_type.Int32 -> Gpu_type.I32 in
+              (* Narrow floats have no register form: they are a storage
+                 format that TMA moves and WGMMA reads from shared memory. *)
+              | Gpu_type.Float32 -> Gpu_type.F32
+              | Gpu_type.Int32 -> Gpu_type.I32
+              | Gpu_type.Bfloat16 | Gpu_type.Float16 ->
+                  invalid_arg "narrow float tiles have no register representation" in
             let scalar=if index=0 then { semantic with Ir.ty=scalar_ty; layout=None }
               else begin
                 let id= !next_id in incr next_id;
@@ -243,6 +248,10 @@ let physicalize target =
     | Ptx_ir.Add_f32 (dst,a,b) -> [Ptx_ir.Add_f32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Mul_f32 (dst,a,b) -> [Ptx_ir.Mul_f32 (scalar dst,scalar a,scalar b)]
     | Ptx_ir.Mad_f32 (dst,a,b,c) -> [Ptx_ir.Mad_f32 (scalar dst,scalar a,scalar b,scalar c)]
+    | Ptx_ir.Unary_f32 (dst,op,a) -> [Ptx_ir.Unary_f32 (scalar dst,op,scalar a)]
+    | Ptx_ir.F32_of_i32 (dst,a) -> [Ptx_ir.F32_of_i32 (scalar dst,scalar a)]
+    | Ptx_ir.Binary_f32 (dst,op,a,b) ->
+        [Ptx_ir.Binary_f32 (scalar dst,op,scalar a,scalar b)]
     | Ptx_ir.Thread_idx_x dst -> [Ptx_ir.Thread_idx_x (scalar dst)]
     | Ptx_ir.Global_idx_x dst -> [Ptx_ir.Global_idx_x (scalar dst)]
     | Ptx_ir.Block_idx_x dst -> [Ptx_ir.Block_idx_x (scalar dst)]
@@ -283,9 +292,9 @@ let physicalize target =
     | Ptx_ir.Gmma_descriptor (d, s, i, fields) ->
         [Ptx_ir.Gmma_descriptor (scalar d, scalar s, scalar i, fields)]
     | Ptx_ir.Wgmma_fence -> [Ptx_ir.Wgmma_fence]
-    | Ptx_ir.Wgmma_mma_tf32 (acc,da,db,n,scale) ->
-        [Ptx_ir.Wgmma_mma_tf32
-           (List.map scalar acc, scalar da, scalar db, n, scale)]
+    | Ptx_ir.Wgmma_mma (element,acc,da,db,n,scale) ->
+        [Ptx_ir.Wgmma_mma
+           (element, List.map scalar acc, scalar da, scalar db, n, scale)]
     | Ptx_ir.Wgmma_commit_group -> [Ptx_ir.Wgmma_commit_group]
     | Ptx_ir.Wgmma_wait_group n -> [Ptx_ir.Wgmma_wait_group n]
     | Ptx_ir.Store_f32 (p,value) -> [Ptx_ir.Store_f32 (scalar p,scalar value)]

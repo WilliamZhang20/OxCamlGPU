@@ -9,13 +9,16 @@ and async copies, TMA/mbarrier, WGMMA descriptors) — not a matmul expand.
 The performant Hopper GEMM schedule is the OxCaml kernel
 [`examples/kernels/gemm.ml`](examples/kernels/gemm.ml):
 one function of the tile constants, specialized to the catalog bindings.
-There is no IR-builder path. Every kernel lives in
-[`examples/kernels/`](examples/kernels/); the tile catalog that maps a problem
-size to one of them is a module of `test/emit_gemm_ptx.ml`. See
-[GEMM frontend design](docs/gemm-frontend.md).
+[`gemm_bf16.ml`](examples/kernels/gemm_bf16.ml) is the same schedule at bf16
+inputs — the element type rides on the kernel's `bf16 tensor_map` formals and
+picks `wgmma.mma_async.…k16.f32.bf16.bf16`, with a byte-identical shared
+window.
 
 On an H100 that kernel holds a repeatable **mid-90s percentage of cuBLAS** at
-4096³ TF32 and runs at parity at 8192³. Under Nsight Compute the durations
+4096³ TF32 and runs at parity at 8192³. The bf16 schedule reaches
+**764 TFLOPS at 8192³, 98.6% of cuBLAS bf16** — 2.03× the TF32 kernel in the
+same run, which is the bf16-to-TF32 WGMMA ratio, so the width is all that
+changed. Under Nsight Compute the durations
 match within 1%, at 88.9% and 93.7% SM throughput against cuBLAS's 88.6% and
 93.2%, and cuBLAS independently picks the same 128×256×32 tile. See
 [measured GEMM performance](docs/architecture.md#measured-gemm-performance).
@@ -39,12 +42,18 @@ first is aligned, so hand-vectorizing an epilogue is not part of the
 authoring model. See [compilation stages](docs/architecture.md#compilation-stages).
 
 The accepted subset includes scalar f32/i32/bool values, one-dimensional f32
-buffers, simple `let` bindings, local functions, sequencing, scalar
-conditionals, ascending `for` loops, and the listed GPU operations. Kernels
-return `unit`. A kernel binding may carry `[@@gpu.threads N]` to set the CTA
-width. Constant `for` loops of at most 64 iterations are unrolled. `downto`,
-`ref` cells, recursive helpers, shaped source tensors, and buffer-valued
-branches are not supported yet. The matmul authoring model (explicit shared, barriers,
+buffers, simple `let` bindings, local and higher-order functions, bounded
+recursion, sequencing, scalar conditionals, ascending `for` loops, and the
+listed GPU operations. Shared tiles, TMA maps and WGMMA operands may also be
+`bf16` or `f16`: narrow floats are a storage format with no register form, so
+the accumulator stays f32 and the element type is a phantom tag rather than a
+scalar. Float math covers the Stdlib operations that round the way OCaml does
+(`-.`, `/.`, `sqrt`, `Float.max`, `float_of_int`, …) plus the hardware's
+approximate unit under names that say so (`Gpu.exp2_approx`,
+`rsqrt_approx`, `tanh_approx`, …). Kernels return `unit`. A kernel binding may
+carry `[@@gpu.threads N]` to set the CTA width. Constant `for` loops of at
+most 64 iterations are unrolled. `downto`, `ref` cells, shaped source tensors,
+and buffer-valued branches are not supported yet. The matmul authoring model (explicit shared, barriers,
 and WGMMA — not a black-box matmul) is in
 [GEMM frontend design](docs/gemm-frontend.md).
 

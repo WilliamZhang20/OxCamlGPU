@@ -61,9 +61,58 @@ reject_unbounded_recursion.ml:11:45: call nested deeper than 64; a recursion
 whose base case is not a compile-time constant cannot be inlined
 ```
 
+### What bounds the inlining, and what deliberately does not
+
+The compiler owes termination and a diagnostic. It does not owe cost control.
+A kernel that is expensive on purpose is the author's business, the same way a
+C++ compiler will instantiate a template that produces a megabyte of code
+without arguing. So a limit here has to answer one of exactly two questions,
+and anything that only answers "is this big?" was removed.
+
+| Limit | Default | Why it exists |
+| --- | --- | --- |
+| `OXGPU_MAX_INLINE_DEPTH` | 64 | A recursion whose base case never folds does not terminate. Termination is the compiler's problem. |
+| `OXGPU_MAX_NESTING` | 8192 | Deep enough expression nesting exhausts the adapter's own stack, giving an uncatchable error with no source location. |
+| `OXGPU_MAX_OPERATIONS` | 33554432 | Runaway backstop only. Matches gcc's `-fconstexpr-ops-limit`. |
+
+They are environment overrides because that is what they are: compiler flags
+on compile-time evaluation, like `-fconstexpr-depth`, `-fbracket-depth`,
+`-ftemplate-depth` and `recursion_limit`. Note the shape of those precedents,
+which this follows: tight on depth, generous on operations.
+
+What that buys, measured. Three nested loops each inside their own
+64-iteration unroll limit multiply to 1,048,576 operations and 164 MB of
+metadata; `fib 24` with a constant argument stays at depth 24 while inlining
+exponentially many calls and takes about four seconds. Both are **accepted**.
+They terminate, they are what the author asked for, and an earlier budget that
+refused them was legislating style. A 20000-term expression is **refused**,
+because that one is a host crash rather than an expense.
+
+Catching `Stack_overflow` was tried first and does not work: the handler never
+ran, since native-code OCaml cannot catch it dependably. The nesting counter
+replaced it, and the dead handler was removed rather than left as false
+reassurance.
+
+None of this can reach the GPU. A kernel emits one `.visible .entry` with no
+`.func`, no `call` and no `.local`, and ptxas reports a 0-byte stack frame for
+every kernel here, so there is no device-side stack to overflow. When the
+adapter does die unguarded it exits 2, not by a signal, with no core dump and
+zero bytes on stdout, so the bridge fails and no partial artifact is left. The
+only thing lost is the source location, which is the whole reason the counters
+exist.
+
+This is a different property from the one the transform passes hold, and the
+two are worth not confusing. The passes never *guess*: the store vectorizer
+fuses only when consecutiveness and alignment are proven and stays scalar
+otherwise, and each refusal has a negative fixture. That is about correctness.
+The limits above are about termination. Neither is about taste.
+
 [`examples/kernels/block_reduce.ml`](../examples/kernels/block_reduce.ml) is
 the practical form: a block reduction as a recursive tree fold parameterized
-by its combining function.
+by its combining function. The same fold is reused at three different
+operators in [`row_norm.ml`](../examples/kernels/row_norm.ml), where softmax
+needs a maximum and then a sum over the same shared tile, and RMS norm needs
+a sum of squares — one definition, no call left anywhere.
 
 ```ocaml
 let rec fold stride =
@@ -165,6 +214,18 @@ Bounded recursion is done, as described above. What remains:
    record case) so functions can travel in tuples and be destructured. This
    is what lets a kernel return several values, which is useful well beyond
    functions.
+5. **Substitute type variables while inlining.** The adapter reads types off
+   a single Typedtree, so a polymorphic helper's body still holds `Tvar`
+   nodes after the call site has fixed them. Any binding whose GPU meaning
+   comes from a type argument then has nothing to read: `Gpu.shared_wgmma`
+   cannot tell whether its tile is f32 or bf16, so one schedule cannot serve
+   both widths and
+   [`examples/kernels/gemm_bf16.ml`](../examples/kernels/gemm_bf16.ml)
+   duplicates [`gemm.ml`](../examples/kernels/gemm.ml). The fix is a
+   substitution carried alongside `Func`'s environment: unify each parameter's
+   declared type with the argument's actual type at the call, and apply the
+   result in `kind`. This is the one Tier 1 item that is about types rather
+   than values, and it is the only thing standing between the two GEMMs.
 ## Tier 2: compile-time data structures
 
 Staged metaprogramming, where the data exists only in the compiler. A list of
@@ -219,7 +280,9 @@ precise about why this language rather than stock OCaml:
 ## Suggested order
 
 Tier 1 items 1 and 2 are small, independent, and unlock ordinary functional
-style inside kernels. Item 4 is worth doing for its own sake. Tier 2 is where
+style inside kernels. Item 5 is the one with a concrete debt behind it — a
+duplicated GEMM — so it is the one to do first. Item 4 is worth doing for its
+own sake. Tier 2 is where
 schedules start to read like programs rather than constants. Tier 3 should
 wait for a kernel that genuinely needs it, and should be gated on uniformity
 when it comes.

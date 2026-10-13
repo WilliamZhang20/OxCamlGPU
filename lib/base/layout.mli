@@ -61,7 +61,12 @@ val memref_strides : Gpu_type.dim list -> t option -> int list
 
 val validate : Gpu_type.dim list -> t -> (unit, string) result
 
-(** XOR mask (in elements) for column swizzle: [col' = col XOR (row AND mask)]. *)
-val swizzle_element_mask : swizzle -> int option
+(** Width of one swizzle period in bytes: the hardware quantity. *)
+val swizzle_bytes : swizzle -> int option
+
+(** XOR mask (in elements) for column swizzle: [col' = col XOR (row AND mask)].
+    Derived from [swizzle_bytes] and the element width, so a 128-byte period
+    is 32 f32 columns and 64 bf16 columns. *)
+val swizzle_element_mask : swizzle -> Gpu_type.dtype -> int option
 
 val string_of_t : t -> string

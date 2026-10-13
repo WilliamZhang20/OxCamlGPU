@@ -19,14 +19,21 @@ trap 'rm -rf "$artifact_dir"' EXIT
 
 metadata_dir="$artifact_dir/metadata"
 (cd "$root" && tools/compile_oxcaml_kernels.sh "$metadata_dir")
-(cd "$root" && dune exec test/emit_gemm_ptx.exe -- \
-  --gpu "$metadata_dir/gemm_fast.gpu") \
-  > "$artifact_dir/gemm_fast.ptx"
-ptxas -arch=sm_90a "$artifact_dir/gemm_fast.ptx" -o "$artifact_dir/gemm_fast.cubin"
-# The launch has to request the kernel's dynamic shared window.
-read -r _threads smem _total < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- \
-  --info "$metadata_dir/gemm_fast.gpu")
-
 nvcc -O2 "$root/test/hardware/run_gemm_h100.cu" -lcuda -o "$artifact_dir/run_gemm_h100"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$artifact_dir/run_gemm_h100" \
-  "$artifact_dir/gemm_fast.cubin" "$smem"
+
+# Both input widths, same schedule shape. BK is the number of elements in a
+# 128-byte swizzle period, so it follows the element size.
+run_one() {
+  local kernel="$1" element="$2" bk="$3"
+  (cd "$root" && dune exec test/emit_gemm_ptx.exe -- \
+    --gpu "$metadata_dir/$kernel.gpu") > "$artifact_dir/$kernel.ptx"
+  ptxas -arch=sm_90a "$artifact_dir/$kernel.ptx" -o "$artifact_dir/$kernel.cubin"
+  # The launch has to request the kernel's dynamic shared window.
+  read -r threads smem _total < <(cd "$root" && dune exec test/emit_gemm_ptx.exe -- \
+    --info "$metadata_dir/$kernel.gpu")
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$artifact_dir/run_gemm_h100" \
+    "$artifact_dir/$kernel.cubin" "$smem" "$kernel" "$element" "$bk" "$threads"
+}
+
+run_one gemm_fast f32 32
+run_one gemm_bf16_fast bf16 64

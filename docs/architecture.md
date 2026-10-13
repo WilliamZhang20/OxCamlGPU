@@ -22,6 +22,9 @@ the same way.
 How much functional code reaches PTX, and what it would take to widen that,
 is assessed in [functions.md](functions.md).
 
+What the GPU mapping still lacks, ordered by value per unit of work, is scoped
+in [roadmap.md](roadmap.md).
+
 Every module carries an `.mli`, which is the house convention, except the four
 that exist only to define IR datatypes: `ir`, `ptx_ir`, `kernel_ast`, and
 `gpu_type`. Every constructor in those is matched on somewhere downstream, so a
@@ -76,11 +79,15 @@ The adapter accepts simple nonrecursive `let` bindings, fully applied local func
 
 Current source buffers are dynamic one-dimensional f32 arrays. Supported operations include indices, unmasked or explicitly masked loads/stores, `warp_sum_f32`, `block_idx_x` / `block_idx_y`, ascending `for` loops, and a grid-leader store. Index arithmetic that interval analysis cannot bound uses the `+:` `-:` `*:` `/:` `%:` operators, which carry i32 wrapping while staying OCaml `int`, so a kernel needs no `Int32` conversions at the DSL boundary; `Int32.add` and friends remain accepted. Kernels return `unit`. `[@@gpu.threads N]` on the kernel binding sets `threads_per_cta`. `downto`, recursive helpers, shaped source tensors, buffer-valued conditionals, and escaping mutable references are unsupported.
 
-GPU `float` uses f32 semantics and separate round-to-nearest-even operations. It does not promise host OCaml binary64 behavior. Native `int` uses a signed i32 ABI; ordinary arithmetic is accepted only when interval analysis proves intermediates fit. The `+:` family, and explicit `Int32.add/sub/mul`, wrap as i32 without asking for a proof. A problem dimension times a row is the case that needs them: it does fit, but the compiler cannot bound a kernel formal. Callers of raw PTX must provide in-range arguments and launch dimensions. Boolean parameters use a u32 slot, with zero representing false.
+GPU `float` uses f32 semantics and separate round-to-nearest-even operations. It does not promise host OCaml binary64 behavior. The Stdlib float operations that reach PTX (`-.`, `/.`, `~-.`, `abs_float`, `sqrt`, `Float.max`, `Float.min`, `float_of_int`) lower to the correctly-rounded instruction, so they keep their OCaml meaning including NaN behaviour; the hardware's approximate special-function unit is reached only through the explicitly named `Gpu.exp2_approx`, `log2_approx`, `tanh_approx`, `rsqrt_approx` and `recip_approx`, because choosing approximation is a numerical decision rather than something to infer. Native `int` uses a signed i32 ABI; ordinary arithmetic is accepted only when interval analysis proves intermediates fit. The `+:` family, and explicit `Int32.add/sub/mul`, wrap as i32 without asking for a proof. A problem dimension times a row is the case that needs them: it does fit, but the compiler cannot bound a kernel formal. Callers of raw PTX must provide in-range arguments and launch dimensions. Boolean parameters use a u32 slot, with zero representing false.
 
 The metadata adapter transports uniqueness, locality, OxCaml domain portability, and visibility from supported signature modes. It does not transport every local Typedtree mode. OxCaml portability means crossing an OxCaml domain boundary; it does not mean host/device portability. GPU-boundary portability is a separate IR fact: the adapter leaves it unspecified on the wire, and `Kernel_frontend.lower` derives `Boundary_portable` for buffer and pointer formals that cross the host/device launch boundary. Scalar formals remain unspecified.
 
 ## Types, modes, and memory
+
+Element width is a property of the type, never a literal in an operation. `Gpu_type.dtype` covers `Int32`, `Float32`, `Bfloat16` and `Float16`, and every address computation asks `dtype_storage_bytes` rather than writing 4: shared addressing reads the MemRef's own dtype, the GMMA descriptor's leading and stride fields are byte counts and so come out the same at every width, and `Layout.swizzle_element_mask` derives its element count from `Layout.swizzle_bytes` and the element size. Narrow floats are a *storage* format with no register form — nothing in a kernel holds a bf16 in a register, because TMA moves them and WGMMA consumes them straight out of shared memory, accumulating in f32. That is why they are phantom tags in the DSL rather than scalar types, and why `Shared_load_f32` and friends still require an f32 tile.
+
+The width rides on the handle. A `bf16 tensor_map` formal makes the tile it fills a `bf16 gpu_shared`, which makes the descriptor a `bf16 gmma_desc`, which makes `Wgmma_mma` select `m64nNk16.f32.bf16.bf16` instead of `m64nNk8.f32.tf32.tf32`. One operation per concept, and the element type picks the instruction; A and B cannot disagree because the descriptor is typed. [`examples/kernels/gemm_bf16.ml`](../examples/kernels/gemm_bf16.ml) is the f32 schedule at the other width, and its shared window is byte-identical.
 
 `Gpu_type` separates logical `Tensor(shape, dtype)` values from addressable `MemRef(shape, dtype, address_space)` storage. Shapes can be static, symbolic, or dynamic. The current source ABI erases buffer shapes to device pointers; extents and strides are not passed. A mask checks nonnegative index and `index < bound`, but the verifier cannot prove that the supplied bound fits the allocation.
 
@@ -129,7 +136,7 @@ The PTX backend covers the operations used by current examples and selected dire
 
 The core `oxgpu` compiler has **no matmul-specific expansion**. It only
 lowers general IR ops authors write (`Shared_*`, `Barrier`, `Tma_load_2d`,
-`Gmma_descriptor`, `Wgmma_mma_tf32`, `Mad_f32`, …).
+`Gmma_descriptor`, `Wgmma_mma`, `Mad_f32`, …).
 
 The **tile catalog** names the shapes, the size-to-shape choice, and the
 kernel binding each shape maps to. It builds no IR, and its only consumer is
@@ -180,6 +187,23 @@ consumer warpgroups.
 | Compute (SM) throughput | 88.9 % | 88.6 % | 93.7 % | 93.2 % |
 | L2 throughput | 57.9 % | 55.1 % | 74.6 % | 62.9 % |
 | DRAM throughput | 25.5 % | 25.4 % | 26.8 % | 26.1 % |
+
+#### bf16, same schedule
+
+[`gemm_bf16.ml`](../examples/kernels/gemm_bf16.ml) at BM=128, BN=256, BK=64,
+stages=4, group_m=16, 288 threads — the same tile in bytes, twice the K depth.
+Against cuBLAS's bf16 path on a GPU with a resident but mostly idle neighbour,
+so read these as a lower bound:
+
+| Problem | oxgpu | cuBLAS | % cuBLAS |
+| --- | --- | --- | --- |
+| 4096³ | 706.6 TFLOPS | 781.0 TFLOPS | 90.5 |
+| 8192³ | 763.7 TFLOPS | 774.4 TFLOPS | 98.6 |
+
+The absolute numbers are the useful check on the lowering: 763.7 against the
+f32 kernel's 375.4 in the same run is 2.03×, which is exactly the ratio of
+bf16 to TF32 WGMMA throughput. The schedule did not change, so the only thing
+that doubled is the instruction the element type picked.
 
 Both kernels are compute-bound at the same SM throughput, and the durations
 match within 1% at 4096³ while 8192³ is a tie. The higher L2 throughput is

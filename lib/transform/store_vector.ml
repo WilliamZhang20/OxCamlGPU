@@ -201,6 +201,7 @@ let movable_across = function
   | Const_i32 _ | Const_f32 _ | Const_bool _ | Thread_idx_x _ | Global_idx_x _
   | Block_idx_x _ | Block_idx_y _ | Gep_f32 _ | Add_i32 _ | Sub_i32 _
   | Mul_i32 _ | Div_i32 _ | Rem_i32 _ | Min_i32 _ | Add_f32 _ | Mul_f32 _ | Mad_f32 _
+  | Unary_f32 _ | Binary_f32 _ | F32_of_i32 _
   | Compare _ ->
       true
   | _ -> false

@@ -23,6 +23,9 @@ type operation =
   | Mul_f32 of Ir.value * Ir.value * Ir.value
   (* dst := a * b + c *)
   | Mad_f32 of Ir.value * Ir.value * Ir.value * Ir.value
+  | Unary_f32 of Ir.value * Gpu_type.unary_f32 * Ir.value
+  | Binary_f32 of Ir.value * Gpu_type.binary_f32 * Ir.value * Ir.value
+  | F32_of_i32 of Ir.value * Ir.value
   | Tensor_scale_f32 of Ir.value * Ir.value * Ir.value
   | Tensor_mul_f32 of Ir.value * Ir.value * Ir.value
   | Thread_idx_x of Ir.value
@@ -55,7 +58,7 @@ type operation =
   | Fence_proxy_async
   | Wgmma_fence
   | Gmma_descriptor of Ir.value * Ir.value * Ir.value * Ir.gmma_fields
-  | Wgmma_mma_tf32 of Ir.value list * Ir.value * Ir.value * int * bool
+  | Wgmma_mma of Gpu_type.dtype * Ir.value list * Ir.value * Ir.value * int * bool
   | Wgmma_commit_group
   | Wgmma_wait_group of int
   | Tile_load_f32 of Ir.value * Ir.value
@@ -161,6 +164,7 @@ let results = function
   | Tensor_lane_f32 (v, _) | Warp_butterfly_sum_f32 (v, _) -> [v]
   | Load_f32x4 (a, b, c, d, _) | Shared_load_f32x4 (a, b, c, d, _, _) -> [a; b; c; d]
   | Add_i32 (v, _, _) | Add_f32 (v, _, _) | Mul_f32 (v, _, _) | Mad_f32 (v, _, _, _)
+  | Unary_f32 (v, _, _) | Binary_f32 (v, _, _, _) | F32_of_i32 (v, _)
   | Tensor_scale_f32 (v, _, _) | Tensor_mul_f32 (v, _, _) -> [v]
   | Mbarrier_slot (v, _, _) -> [v]
   | Store_f32 _ | Store_f32_masked _ | Store_f32x2 _ | Store_f32x4 _
@@ -169,7 +173,7 @@ let results = function
   | Mbarrier_init _ | Mbarrier_arrive_expect_tx _ | Mbarrier_arrive _
   | Mbarrier_try_wait_parity _
   | Tma_load_2d _ | Fence_proxy_async
-  | Wgmma_fence | Wgmma_mma_tf32 _ | Wgmma_commit_group | Wgmma_wait_group _
+  | Wgmma_fence | Wgmma_mma _ | Wgmma_commit_group | Wgmma_wait_group _
   | Tile_store_f32 _ | Tile_store_f32_indexed _
   | Tile_store_f32_masked _ | Tile_store_f32_2d _
   | Store_grid_leader_f32 _ | Barrier_cta | Return -> []
@@ -185,6 +189,8 @@ let operands = function
   | Add_i32 (_, a, b) | Add_f32 (_, a, b) | Mul_f32 (_, a, b)
   | Tensor_scale_f32 (_, a, b) | Tensor_mul_f32 (_, a, b) -> [a;b]
   | Mad_f32 (_, a, b, c) -> [a; b; c]
+  | Unary_f32 (_, _, a) | F32_of_i32 (_, a) -> [a]
+  | Binary_f32 (_, _, a, b) -> [a; b]
   | Gep_f32 (_, p, i) -> [p;i]
   | Load_f32 (_, p) | Tile_load_f32 (_, p) | Tensor_lane_f32 (_, p)
   | Warp_butterfly_sum_f32 (_, p) -> [p]
@@ -204,7 +210,7 @@ let operands = function
   | Tma_load_2d (s, i, t, c0, c1, m, p) ->
       s :: i :: t :: c0 :: c1 :: m :: Option.to_list p
   | Gmma_descriptor (_, smem, index, _) -> [smem; index]
-  | Wgmma_mma_tf32 (acc, desc_a, desc_b, _, _) ->
+  | Wgmma_mma (_, acc, desc_a, desc_b, _, _) ->
       acc @ [desc_a; desc_b]
   | Tile_load_f32_indexed (_, p, _, _) -> [p]
   | Tile_load_f32_masked (_, p, rows, cols) -> [p;rows;cols]

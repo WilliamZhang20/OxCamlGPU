@@ -26,20 +26,25 @@ let resolve_atom ~loc ~args definitions = function
    sit 8 row-bytes apart, counted in the descriptor's 16-byte units; a K-major
    operand's leading offset is one such unit. Only the swizzle and row size
    WGMMA actually accepts are derivable, and anything else is rejected rather
-   than guessed. *)
+   than guessed.
+
+   Every quantity here is a byte count, which is why the same derivation
+   serves every element width: a swizzle period is 128 bytes whether that is
+   32 f32 columns or 64 bf16 columns, and the descriptor is unchanged. *)
 let gmma_fields_of_tile loc (tile : Ir.value) =
   match tile.Ir.ty, tile.Ir.layout with
-  | Gpu_type.MemRef ([Gpu_type.Static _; Gpu_type.Static cols], Gpu_type.Float32,
+  | Gpu_type.MemRef ([Gpu_type.Static _; Gpu_type.Static cols], dtype,
                      Gpu_type.Shared),
     Some (Layout.Shared { order = [1; 0]; swizzle = Layout.Swizzle_128B; _ })
-    when cols * 4 = 128 ->
-      { Ir.leading = 1; stride = 8 * (cols * 4) / 16; layout_type = 1 }
-  | Gpu_type.MemRef ([Gpu_type.Static _; Gpu_type.Static cols], Gpu_type.Float32,
-                     Gpu_type.Shared),
-    Some (Layout.Shared { order = [1; 0]; swizzle = Layout.Swizzle_128B; _ }) ->
-      Source_span.fail loc
-        (Printf.sprintf
-           "a 128-byte-swizzled WGMMA tile needs 32 f32 columns, not %d" cols)
+    when Gpu_type.is_float_dtype dtype ->
+      let row_bytes = cols * Gpu_type.dtype_storage_bytes dtype in
+      if row_bytes <> 128 then
+        Source_span.fail loc
+          (Printf.sprintf
+             "a 128-byte-swizzled WGMMA tile needs a 128-byte row: %d %s \
+              columns is %d bytes"
+             cols (Gpu_type.string_of_dtype dtype) row_bytes);
+      { Ir.leading = 1; stride = 8 * row_bytes / 16; layout_type = 1 }
   | _ ->
       Source_span.fail loc
         "a WGMMA operand descriptor needs a K-major swizzled shared tile \
@@ -192,6 +197,11 @@ let lower (source : Kernel_ast.t) =
         | Kernel_ast.Mad_f32 (d, acc, a, b) ->
             (* dst = a * b + acc *)
             [Mad_f32 (define d F32, atom loc a, atom loc b, atom loc acc)]
+        | Kernel_ast.Unary_f32 (d, op, a) ->
+            [Unary_f32 (define d F32, op, atom loc a)]
+        | Kernel_ast.Binary_f32 (d, op, a, b) ->
+            [Binary_f32 (define d F32, op, atom loc a, atom loc b)]
+        | Kernel_ast.F32_of_i32 (d, a) -> [F32_of_i32 (define d F32, atom loc a)]
 
         | Kernel_ast.Add_i32 (d, a, b) ->
             [Add_i32 (define d I32, atom loc a, atom loc b)]
@@ -223,10 +233,10 @@ let lower (source : Kernel_ast.t) =
         | Kernel_ast.Store_grid_leader_f32 (p, v) ->
             [Store_f32_grid_leader (memory p, atom loc v)]
 
-        | Kernel_ast.Shared_alloc (d, rows, cols, layout_kind) ->
+        | Kernel_ast.Shared_alloc (d, rows, cols, element, layout_kind) ->
             if rows <= 0 || cols <= 0 then
               Source_span.fail loc "shared extents must be positive";
-            let ty = MemRef ([Static rows; Static cols], Float32, Shared) in
+            let ty = MemRef ([Static rows; Static cols], element, Shared) in
             let layout =
               match layout_kind with
               | `Plain -> shared_plain
@@ -303,7 +313,7 @@ let lower (source : Kernel_ast.t) =
             [Gmma_descriptor
                (define d U64, tile, atom loc idx,
                 gmma_fields_of_tile loc tile)]
-        | Kernel_ast.Wgmma_mma_tf32 (acc, da, db, n, scale) ->
+        | Kernel_ast.Wgmma_mma (element, acc, da, db, n, scale) ->
             let acc =
               List.map
                 (fun id ->
@@ -313,7 +323,7 @@ let lower (source : Kernel_ast.t) =
                       Source_span.fail loc "undefined WGMMA accumulator")
                 acc
             in
-            [Wgmma_mma_tf32 (acc, atom loc da, atom loc db, n, scale)]
+            [Wgmma_mma (element, acc, atom loc da, atom loc db, n, scale)]
         | Kernel_ast.Wgmma_commit_group -> [Wgmma_commit_group]
         | Kernel_ast.Wgmma_wait_group n -> [Wgmma_wait_group n]
 

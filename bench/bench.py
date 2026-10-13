@@ -10,7 +10,10 @@ Protocol follows NVIDIA/tilus examples/hopper_matmul/benchmark.py:
   - Default matmul sizes: 4096³ and 8192³ (not launch-noise microkernels)
 
 TF32-on GEMM: OxGPU WGMMA (f32.tf32.tf32) vs torch.matmul with TF32 enabled
-so %cuBLAS is an honest tensor-core race on Hopper.
+so %cuBLAS is an honest tensor-core race on Hopper. --matmul-element bf16
+races the k16 kernel against cuBLAS's bf16 path instead; the kernel stores f32
+at either width, and cuBLAS keeps its own output dtype so the comparison is
+against its fast path.
 """
 from __future__ import annotations
 
@@ -44,7 +47,17 @@ MATMUL_SMEM = 0
 CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8
 
 # Driver enums for cuTensorMapEncodeTiled (cuda.h).
+CU_TENSOR_MAP_DATA_TYPE_FLOAT16 = 6
 CU_TENSOR_MAP_DATA_TYPE_FLOAT32 = 7
+CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 = 9
+
+# The input element type the kernel was compiled for. A 128-byte TMA/GMMA
+# swizzle period is BK elements wide, so BK follows from the size.
+ELEMENTS = {
+    "f32": (CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4, torch.float32),
+    "bf16": (CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, torch.bfloat16),
+    "f16": (CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, torch.float16),
+}
 CU_TENSOR_MAP_INTERLEAVE_NONE = 0
 CU_TENSOR_MAP_SWIZZLE_NONE = 0
 CU_TENSOR_MAP_SWIZZLE_32B = 1
@@ -111,7 +124,8 @@ class CUtensorMap(ctypes.Structure):
 
 
 def encode_tensor_map_2d(cuda, device_ptr: int, dim0: int, dim1: int,
-                         stride1_bytes: int, box0: int, box1: int) -> CUtensorMap:
+                         stride1_bytes: int, box0: int, box1: int,
+                         data_type: int = CU_TENSOR_MAP_DATA_TYPE_FLOAT32) -> CUtensorMap:
     tensor_map = CUtensorMap()
     global_dim = (ctypes.c_uint64 * 2)(dim0, dim1)
     global_strides = (ctypes.c_uint64 * 1)(stride1_bytes)
@@ -119,7 +133,7 @@ def encode_tensor_map_2d(cuda, device_ptr: int, dim0: int, dim1: int,
     element_strides = (ctypes.c_uint32 * 2)(1, 1)
     checked(cuda.cuTensorMapEncodeTiled(
         ctypes.byref(tensor_map),
-        CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        data_type,
         2,
         ctypes.c_void_p(device_ptr),
         global_dim,
@@ -228,23 +242,33 @@ def bench_matmul_size(
     bk: int = MATMUL_BK,
     threads: int = MATMUL_THREADS,
     smem: int = MATMUL_SMEM,
+    element: str = "f32",
 ):
     if m_size % bm or n_size % bn or k_size % bk:
         raise ValueError(
             f"matmul size {m_size}x{n_size}x{k_size} must be divisible by "
             f"CTA {bm}x{bn} and BK {bk}")
+    data_type, ebytes, torch_dtype = ELEMENTS[element]
+    if bk * ebytes != 128:
+        raise ValueError(
+            f"BK {bk} is not a 128-byte row at {ebytes} bytes per {element} element")
     scale = k_size ** 0.25
-    a = torch.randn(m_size, k_size, device="cuda", dtype=torch.float32) / scale
-    b = torch.randn(k_size, n_size, device="cuda", dtype=torch.float32) / scale
+    a = (torch.randn(m_size, k_size, device="cuda", dtype=torch.float32)
+         / scale).to(torch_dtype)
+    b = (torch.randn(k_size, n_size, device="cuda", dtype=torch.float32)
+         / scale).to(torch_dtype)
+    # The kernel accumulates and stores f32 at every input width; cuBLAS gets
+    # its own natural output dtype so the comparison is against its fast path.
     c_ox = torch.empty(m_size, n_size, device="cuda", dtype=torch.float32)
-    c_ref = torch.empty(m_size, n_size, device="cuda", dtype=torch.float32)
+    c_ref = torch.empty(m_size, n_size, device="cuda", dtype=torch_dtype)
 
     # A[M,K] → TMA (K,M) box (BK,BM); B as K-contig via B^T[N,K] → TMA (K,N) box (BK,BN).
     a_map = encode_tensor_map_2d(
-        cuda, a.data_ptr(), k_size, m_size, k_size * 4, bk, bm)
+        cuda, a.data_ptr(), k_size, m_size, k_size * ebytes, bk, bm, data_type)
     b_k_major = b.T.contiguous()
     b_map = encode_tensor_map_2d(
-        cuda, b_k_major.data_ptr(), k_size, n_size, k_size * 4, bk, bn)
+        cuda, b_k_major.data_ptr(), k_size, n_size, k_size * ebytes, bk, bn,
+        data_type)
     d_a_map, a_map_buf = alloc_device_tensor_map(cuda, a_map)
     d_b_map, b_map_buf = alloc_device_tensor_map(cuda, b_map)
     c_ptr = ctypes.c_uint64(c_ox.data_ptr())
@@ -271,12 +295,14 @@ def bench_matmul_size(
     stream.synchronize()
     torch.matmul(a, b, out=c_ref)
     stream.synchronize()
-    # TF32 WGMMA vs TF32 cuBLAS: allow modest absolute error from rounding paths.
-    if not torch.allclose(c_ox, c_ref, atol=5e-2, rtol=1e-2):
-        max_err = (c_ox - c_ref).abs().max().item()
+    # Rounding paths differ: TF32 truncates its inputs, and the bf16 reference
+    # also rounds its *output*, so the tolerance follows the input precision.
+    atol, rtol = (5e-2, 1e-2) if element == "f32" else (2e-1, 3e-2)
+    if not torch.allclose(c_ox, c_ref.float(), atol=atol, rtol=rtol):
+        max_err = (c_ox - c_ref.float()).abs().max().item()
         raise RuntimeError(
             f"OxGPU matmul mismatch vs torch.matmul at {m_size}x{n_size}x{k_size} "
-            f"(max abs err={max_err})")
+            f"({element}, max abs err={max_err})")
 
     time.sleep(cooldown)
     ox_ms = benchmark_func(launch_mm, warmup=warmup, repeat=repeat)
@@ -289,7 +315,8 @@ def bench_matmul_size(
     ox_tf = tflops(ox_ms, m_size, n_size, k_size)
     cublas_tf = tflops(cublas_ms, m_size, n_size, k_size)
     pct = 100.0 * ox_tf / cublas_tf if cublas_tf > 0 else float("nan")
-    print(f"\nmatmul M={m_size} N={n_size} K={k_size} (TF32 on), "
+    label = "TF32 on" if element == "f32" else element
+    print(f"\nmatmul M={m_size} N={n_size} K={k_size} ({label}), "
           f"CTA {bm}x{bn}, grid ({grid_x},{grid_y}), "
           f"threads={threads}, smem={smem}")
     print(f"  {'version':24s} {'latency (ms)':>12s} {'tflops':>10s} {'% cublas':>10s}")
@@ -316,6 +343,8 @@ def main():
     parser.add_argument("--matmul-bn", type=int, default=MATMUL_BN)
     parser.add_argument("--matmul-bk", type=int, default=MATMUL_BK)
     parser.add_argument("--matmul-threads", type=int, default=MATMUL_THREADS)
+    parser.add_argument("--matmul-element", choices=sorted(ELEMENTS), default="f32",
+                        help="Input element type the matmul cubin was compiled for")
     parser.add_argument("--matmul-smem", type=int, default=MATMUL_SMEM,
                         help="Dynamic shared memory bytes the kernel needs "
                              "(emit_gemm_ptx --info)")
@@ -443,9 +472,12 @@ def main():
                 matmul_fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 args.matmul_smem),
                 "cuFuncSetAttribute matmul smem")
+        # TF32 matters only when the inputs are f32: cuBLAS reads bf16 and f16
+        # on the tensor cores regardless of that switch.
+        precision = "TF32 on" if args.matmul_element == "f32" else args.matmul_element
         print(
             f"\nMatmul (Tilus protocol: warmup={args.warmup}, repeat={args.repeat}, "
-            f"cooldown={args.cooldown}s, L2 flush on, TF32 on)")
+            f"cooldown={args.cooldown}s, L2 flush on, {precision})")
         if args.matmul_size is not None:
             sizes: Sequence[tuple[int, int, int]] = [tuple(args.matmul_size)]  # type: ignore
         else:
@@ -456,7 +488,8 @@ def main():
                 m_size, n_size, k_size,
                 args.warmup, args.repeat, args.cooldown,
                 bm=args.matmul_bm, bn=args.matmul_bn, bk=args.matmul_bk,
-                threads=args.matmul_threads, smem=args.matmul_smem)
+                threads=args.matmul_threads, smem=args.matmul_smem,
+                element=args.matmul_element)
         checked(cuda.cuModuleUnload(matmul_module), "cuModuleUnload matmul")
 
 
