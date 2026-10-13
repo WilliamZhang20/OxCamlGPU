@@ -69,4 +69,5 @@ val swizzle_bytes : swizzle -> int option
     is 32 f32 columns and 64 bf16 columns. *)
 val swizzle_element_mask : swizzle -> Gpu_type.dtype -> int option
 
+val string_of_swizzle : swizzle -> string
 val string_of_t : t -> string

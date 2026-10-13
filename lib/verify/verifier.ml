@@ -59,7 +59,7 @@ let verify_kernel k =
     | Ptr (F32, Global) | F32 | I32 | Bool | Tensor_map -> ()
     | ty when is_global_f32_memref ty || is_static_global_f32_tile ty -> ()
     | _ -> add "E_ARG_TYPE" ("argument " ^ a.name ^ " has an unsupported GPU kernel ABI type")) k.args;
-  let ids = List.sort compare arg_ids in
+  let ids = List.sort Int.compare arg_ids in
   let rec duplicate = function x :: y :: _ when x = y -> true | _ :: tl -> duplicate tl | [] -> false in
   if duplicate ids then add "E_DUPLICATE_ARG_ID" "argument value ids must be distinct";
   let seen = Hashtbl.create 16 in
@@ -84,6 +84,30 @@ let verify_kernel k =
           add "E_UNREADABLE_LOAD" (what ^ " requires a readable shared MemRef");
         true
     | _ -> false
+  in
+  (* Every scalar and vector shared access addresses its tile linearly. A
+     swizzled tile is permuted by the TMA engine on the way in and read back
+     permuted by GMMA, both in hardware, and nothing in the backend applies
+     that permutation in software — so a linear access lands on the wrong
+     bytes and computes a wrong answer with no diagnostic at all. The
+     tile-movement path already demands an unswizzled layout
+     ([Ptx_lowering.require_shared_layout]); this is the same demand for the
+     scalar path. Lifting it means teaching PTX emission to swizzle, not
+     relaxing the check.
+
+     This was five copies of the layout-kind test before, which is exactly
+     how the swizzle case came to be missing from all five. *)
+  let check_linear_shared what memref =
+    match memref.layout with
+    | Some (Layout.Shared { swizzle; _ })
+    | Some (Layout.Padded_shared { base = { swizzle; _ }; _ }) ->
+        if swizzle <> Layout.No_swizzle then
+          add "E_SHARED_SWIZZLE"
+            (Printf.sprintf
+               "%s addresses shared MemRef %d linearly, but its layout is \
+                %s-swizzled; only TMA and GMMA may touch a swizzled tile"
+               what memref.id (Layout.string_of_swizzle swizzle))
+    | _ -> add "E_SHARED_LAYOUT" (what ^ " requires a shared MemRef layout")
   in
   (* A GMMA descriptor erases its tile's element type to u64, so the source
      type system is what stops an f32 tile from feeding a bf16 WGMMA. The IR
@@ -243,18 +267,14 @@ let verify_kernel k =
     | Shared_load_f32 (dst, memref, index) ->
         (match dst.ty, memref_type memref.ty, index.ty with
          | F32, Some (_, Float32, Shared), I32 ->
-             (match memref.layout with
-              | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
-              | _ -> add "E_SHARED_LAYOUT" "shared load requires a shared MemRef layout");
+             check_linear_shared "shared load" memref;
              if not (readable memref.permission) then
                add "E_UNREADABLE_LOAD" (Printf.sprintf "shared load through non-readable MemRef %d" memref.id)
          | _ -> add "E_LOAD_TYPE" "shared load requires f32 result, shared f32 MemRef, and i32 index")
     | Shared_load_f32x4 (a, b, c, d, memref, index) ->
         (match a.ty, b.ty, c.ty, d.ty, memref_type memref.ty, index.ty with
          | F32, F32, F32, F32, Some (_, Float32, Shared), I32 ->
-             (match memref.layout with
-              | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
-              | _ -> add "E_SHARED_LAYOUT" "shared f32x4 load requires a shared MemRef layout");
+             check_linear_shared "shared f32x4 load" memref;
              if not (readable memref.permission) then
                add "E_UNREADABLE_LOAD"
                  (Printf.sprintf "shared f32x4 load through non-readable MemRef %d" memref.id)
@@ -264,18 +284,14 @@ let verify_kernel k =
     | Shared_store_f32 (memref, value, index) ->
         (match memref_type memref.ty, value.ty, index.ty with
          | Some (_, Float32, Shared), F32, I32 ->
-             (match memref.layout with
-              | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
-              | _ -> add "E_SHARED_LAYOUT" "shared store requires a shared MemRef layout");
+             check_linear_shared "shared store" memref;
              if not (writable memref.permission) then
                add "E_READONLY_STORE" (Printf.sprintf "shared store through non-writable MemRef %d" memref.id)
          | _ -> add "E_STORE_TYPE" "shared store requires shared f32 MemRef, f32 value, and i32 index")
     | Shared_store_f32x4 (memref, a, b, c, d, index) ->
         (match memref_type memref.ty, a.ty, b.ty, c.ty, d.ty, index.ty with
          | Some (_, Float32, Shared), F32, F32, F32, F32, I32 ->
-             (match memref.layout with
-              | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
-              | _ -> add "E_SHARED_LAYOUT" "shared f32x4 store requires a shared MemRef layout");
+             check_linear_shared "shared f32x4 store" memref;
              if not (writable memref.permission) then
                add "E_READONLY_STORE"
                  (Printf.sprintf "shared f32x4 store through non-writable MemRef %d" memref.id)
@@ -286,9 +302,7 @@ let verify_kernel k =
     | Cp_async_shared_f32x4 (memref, index, ptr) ->
         (match memref_type memref.ty, index.ty, ptr.ty with
          | Some (_, Float32, Shared), I32, Ptr (F32, Global) ->
-             (match memref.layout with
-              | Some (Layout.Shared _ | Layout.Padded_shared _) -> ()
-              | _ -> add "E_SHARED_LAYOUT" "cp.async requires a shared MemRef layout");
+             check_linear_shared "cp.async" memref;
              if not (writable memref.permission) then
                add "E_READONLY_STORE" "cp.async destination must be writable";
              if not (readable ptr.permission) then

@@ -64,16 +64,28 @@ type affine = { constant : int; terms : (string * int) list }
 
 let constant_form n = { constant = n; terms = [] }
 
+(* Coefficients keyed by the atom's structural key. A Map is sorted by
+   construction, which is the property [difference] and form equality rely on,
+   so there is no sort to get wrong. *)
+module Terms = Map.Make (String)
+
+(* Both lists accumulate the same way, so a repeated atom sums no matter which
+   side it came from. Asymmetry here was a latent bug: the previous version
+   loaded [a] with [Hashtbl.replace] and only accumulated [b], so a duplicate
+   atom in [a] silently dropped a term. Nothing produces one today, but that
+   was an unwritten invariant rather than a property of the code.
+
+   A zero coefficient is dropped because an atom that cancels is not part of
+   the form, and keeping it would make two equal forms compare unequal. *)
 let merge_terms a b =
-  let table = Hashtbl.create 8 in
-  List.iter (fun (k, c) -> Hashtbl.replace table k c) a;
-  List.iter
-    (fun (k, c) ->
-      let current = try Hashtbl.find table k with Not_found -> 0 in
-      Hashtbl.replace table k (current + c))
-    b;
-  Hashtbl.fold (fun k c acc -> if c = 0 then acc else (k, c) :: acc) table []
-  |> List.sort (fun (a, _) (b, _) -> compare a b)
+  let add terms (key, coefficient) =
+    Terms.update key
+      (fun existing -> Some (Option.value existing ~default:0 + coefficient))
+      terms
+  in
+  List.fold_left add (List.fold_left add Terms.empty a) b
+  |> Terms.filter (fun _ coefficient -> coefficient <> 0)
+  |> Terms.bindings
 
 let add_form a b =
   { constant = a.constant + b.constant; terms = merge_terms a.terms b.terms }
@@ -270,9 +282,8 @@ let fuse_straight_line a body =
   let edits = Hashtbl.create 16 in
   let rec chunk = function
     | [] -> ()
-    | run ->
+    | start :: _ as run ->
         let length = List.length run in
-        let start = List.hd run in
         let width =
           if length >= 4 && divides 4 (congruence a start.index) then 4
           else if length >= 2 && divides 2 (congruence a start.index) then 2

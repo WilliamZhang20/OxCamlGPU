@@ -7,11 +7,16 @@ let is_pointer = Gpu_type.is_global_f32_buffer
    their own and share the test. *)
 let is_warp_reduction_input value =
   let warp_local extent ~lanes ~subgroups ~per_lane coordinate =
-    lanes = [32] && subgroups = [1] && extent = 32 * List.hd per_lane &&
-    List.for_all (fun index ->
-      let h = coordinate index in
-      h.Layout.subgroup_id = 0 && h.Layout.cta = [0])
-      (List.init extent Fun.id)
+    lanes = [32]
+    && subgroups = [1]
+    (* One element per lane per logical index, so the layout is rank one: the
+       match says that instead of a List.hd assuming it. *)
+    && (match per_lane with [n] -> extent = 32 * n | _ -> false)
+    && List.for_all
+         (fun index ->
+           let h = coordinate index in
+           h.Layout.subgroup_id = 0 && h.Layout.cta = [0])
+         (List.init extent Fun.id)
   in
   match value.ty, value.layout with
   | Gpu_type.Tensor ([Gpu_type.Static extent], Gpu_type.Float32),

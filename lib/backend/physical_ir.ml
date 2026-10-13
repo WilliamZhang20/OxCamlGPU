@@ -165,7 +165,15 @@ let physicalize target =
     Hashtbl.add table semantic.Ir.id { semantic; registers;
       layout_mapping=mapping_for_layout semantic.Ir.layout }
   end) values;
-  let physical id = Hashtbl.find table id in
+  (* Every value reachable from the target was registered above, so a miss is
+     a bug in this pass. Say which value, the way the slot lookup below does,
+     rather than letting Not_found escape the compiler. *)
+  let physical id =
+    match Hashtbl.find_opt table id with
+    | Some entry -> entry
+    | None ->
+        invalid_arg
+          (Printf.sprintf "physicalization: value %d was never registered" id) in
   let slot value index =
     match List.find_opt (fun register -> register.index=index) (physical value.Ir.id).registers with
     | Some register -> register.value

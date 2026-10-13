@@ -113,7 +113,7 @@ let shared_plan name body =
   in
   (* Lay out by ascending id so the same kernel always yields the same PTX. *)
   let allocations =
-    List.sort_uniq (fun a b -> compare a.Ir.id b.Ir.id) allocations in
+    List.sort_uniq (fun a b -> Int.compare a.Ir.id b.Ir.id) allocations in
   let align n = ((n + shared_window_align - 1) / shared_window_align)
                 * shared_window_align in
   (* Each allocation starts on the window alignment, which GMMA descriptors

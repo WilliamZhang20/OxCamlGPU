@@ -174,6 +174,13 @@ for kernel in float_math float_extremes; do
   "$tmp/export_typedtree_modes" "$tmp/float_math.cmt" "$kernel" > "$out/$kernel.gpu"
 done
 
+# Accepted by the adapter, rejected by the verifier: a software store into a
+# swizzled tile. See test/fixtures/swizzled_shared.ml.
+"$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \
+  -o "$tmp/swizzled_shared.cmo" test/fixtures/swizzled_shared.ml
+"$tmp/export_typedtree_modes" "$tmp/swizzled_shared.cmt" swizzled_shared \
+  > "$out/swizzled_shared.gpu"
+
 # f16 is the third WGMMA width; there is no hardware test for it, so the
 # compiled instruction is the claim. See test/fixtures/f16_wgmma.ml.
 "$compiler" -nostdlib -I "$stdlib_dir" -I "$tmp" -bin-annot -c \

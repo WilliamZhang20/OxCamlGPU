@@ -78,6 +78,40 @@ GPU mapping:
   be shared, so it is worth doing for its own sake. Until then the duplication
   is real and should be read as a frontend gap, not a GPU one.
 
+## Where the current layout vocabulary runs out
+
+Two restrictions are sized to a kernel whose data movement is entirely TMA and
+WGMMA, and they come due together:
+
+- The swizzle enum (`None`, `32B`, `64B`, `128B`) is the sm_90 hardware set
+  and the GMMA descriptor's 2-bit `layout_type` field, so enumerating it is
+  faithful modelling rather than simplification — *as long as the swizzle is a
+  mode bit handed to hardware*. CuTe's `Swizzle<B,M,S>` and Triton's
+  `vec`/`perPhase`/`maxPhase` are parameterized because those compilers emit
+  the XOR themselves.
+- `Layout.Register` / `Mapped_register` is a per-dimension factorization and
+  **cannot** express an MMA fragment. The WGMMA column map is
+  `(i&1)·1 + (lane&3)·2 + (i>>2)·8` — a lane digit sandwiched between two
+  register digits — while `Mapped_register` offers only lane-above-all-registers
+  (`Blocked`) or lane-below-all-registers (`Interleaved`). The row map happens
+  to be expressible, which would be the worst outcome: half a fragment
+  described. `Gpu.wgmma_acc_row`/`_col` therefore carry the fragment as closed
+  form in the adapter. Expressing it needs a hierarchical shape/stride algebra,
+  not another constructor.
+
+Both come due when an instruction family arrives where *the compiler* owns the
+shared address and the register placement: `ldmatrix`/`stmatrix`, `mma.sync`,
+or register→shared staging into a swizzled tile. On the ordered list below
+that is item 2, the staged TMA-store epilogue — correct with an unswizzled
+tile, so the real trigger is the bank conflicts in its profile. `mma.sync` and
+`ldmatrix` force it outright but are not planned, since WGMMA supersedes them
+on Hopper.
+
+Until then `E_SHARED_SWIZZLE` keeps the boundary explicit: only TMA and GMMA
+may touch a swizzled tile, because nothing in the backend applies the
+permutation in software. `test/fixtures/swizzled_shared.ml` is the fixture.
+The day that rule has to be lifted is the day both generalizations are due.
+
 ## Ordered by value per unit of work
 
 **1. Atomics.** `atom.global.add` on f32 and u32, and compare-and-swap.

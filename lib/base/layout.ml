@@ -53,7 +53,7 @@ type hardware_coordinate = {
 
 let valid_order rank order =
   List.length order = rank
-  && List.sort compare order = List.init rank Fun.id
+  && List.sort Int.compare order = List.init rank Fun.id
 
 let linearize order extents coordinates =
   List.fold_left (fun (stride, value) dimension ->
@@ -213,7 +213,15 @@ let shared_storage_bytes shape dtype layout = match layout with
         | Gpu_type.Static n when n > 0 -> n
         | Gpu_type.Static _ -> invalid_arg "shared storage dimensions must be positive"
         | Gpu_type.Symbol _ | Gpu_type.Dynamic -> invalid_arg "shared storage size requires a fully static shape") shape in
-      let fastest=List.hd base.order in
+      (* The rank check above is about [shape]; what gets indexed here is
+         [base.order], and nothing has established the two agree. [validate]
+         would have, but this function is reachable without it. *)
+      let fastest =
+        match base.order with
+        | fastest :: _ when valid_order rank base.order -> fastest
+        | _ ->
+            invalid_arg
+              "row-padded shared layout order must permute the tile's dimensions" in
       let row_elements=List.nth extents fastest in
       let rows=Gpu_type.shape_elements shape / row_elements in
       let element_bytes=Gpu_type.dtype_storage_bytes dtype in

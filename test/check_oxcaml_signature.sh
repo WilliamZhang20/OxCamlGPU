@@ -215,6 +215,16 @@ if [[ "$f32_window" != "$bf16_window" ]]; then
   exit 1
 fi
 
+# Only TMA and GMMA may touch a swizzled tile. A software store into one is
+# well-typed and would silently read the wrong bytes, so the verifier has to
+# be the thing that stops it, with a source location.
+if run_ptx_emitter "$tmpdir/swizzled_shared.gpu" > "$tmpdir/swizzled.ptx" \
+     2> "$tmpdir/swizzled.err"; then
+  echo "Software store into a swizzled shared tile was accepted" >&2; exit 1
+fi
+rg -q 'E_SHARED_SWIZZLE' "$tmpdir/swizzled.err"
+rg -q 'swizzled_shared.ml:[0-9]+:[0-9]+:' "$tmpdir/swizzled.err"
+
 # f16 picks the same k16 shape as bf16 and differs only in the suffix.
 rg -q $'^body\tshared_alloc\t[0-9]+\t64\t64\tf16\twgmma$' "$tmpdir/f16_wgmma.gpu"
 run_ptx_emitter "$tmpdir/f16_wgmma.gpu" > "$tmpdir/f16_wgmma.ptx"
