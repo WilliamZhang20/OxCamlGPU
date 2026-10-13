@@ -91,7 +91,9 @@ let span_fields (loc : Source_span.t) =
 let parse_span = function
   | [f; l; c; e; d] ->
       let file =
-        try Scanf.sscanf f "%S%!" Fun.id with _ -> fail "invalid source filename"
+        (try Scanf.sscanf f "%S%!" Fun.id with
+         | Scanf.Scan_failure _ | Failure _ | End_of_file ->
+             fail "invalid source filename")
       in
       let loc =
         { Source_span.file
@@ -353,7 +355,9 @@ let parse source =
           | ["body"; "const_f32"; d; v] ->
               Const_f32
                 ( id d
-                , (try float_of_string v with _ -> fail "invalid float") )
+                , (match float_of_string_opt v with
+                   | Some f -> f
+                   | None -> fail ("invalid float: " ^ v)) )
           | ["body"; "const_bool"; d; v] ->
               Const_bool
                 ( id d

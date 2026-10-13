@@ -59,10 +59,19 @@ type state = {
    For comparison: clang -fconstexpr-depth 512, -fbracket-depth 256,
    -fconstexpr-steps 1048576; gcc -fconstexpr-ops-limit 33554432;
    rustc recursion_limit 128. Tight on depth, generous on operations. *)
+(* A malformed limit is refused rather than quietly replaced by the default:
+     someone who sets one of these asked for a specific number, and silently
+     compiling at a different one is the wrong kind of help. *)
 let env_int name default =
   match Sys.getenv_opt name with
-  | Some text -> (try int_of_string text with _ -> default)
   | None -> default
+  | Some text ->
+      (match int_of_string_opt text with
+       | Some n when n > 0 -> n
+       | Some _ | None ->
+           prerr_endline
+             (name ^ " must be a positive integer, got: " ^ text);
+           exit 2)
 
 let max_inline_depth = env_int "OXGPU_MAX_INLINE_DEPTH" 64
 let max_emitted_operations = env_int "OXGPU_MAX_OPERATIONS" 33554432

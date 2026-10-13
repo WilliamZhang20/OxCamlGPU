@@ -32,20 +32,31 @@ let mapping_for_layout = function
 let max_value_id target =
   List.fold_left (fun n v -> max n v.Ir.id) (-1) (Ptx_ir.all_values target)
 
-let register_elements = function
-  | Layout.Register r -> r.Layout.elements_per_lane
-  | Layout.Mapped_register r -> r.Layout.elements_per_lane
-  | _ -> invalid_arg "register layout expected"
+(* The three factor lists of whichever register layout a tile carries. The
+   message names the field, because all three used to report the same string
+   and a failure could not say which lookup went wrong. *)
+let register_factors what select_register select_mapped = function
+  | Layout.Register r -> select_register r
+  | Layout.Mapped_register r -> select_mapped r
+  | layout ->
+      invalid_arg
+        (Printf.sprintf "%s requires a register layout, got %s" what
+           (Layout.string_of_t layout))
 
-let register_lanes = function
-  | Layout.Register r -> r.Layout.lanes_per_subgroup
-  | Layout.Mapped_register r -> r.Layout.lanes_per_subgroup
-  | _ -> invalid_arg "register layout expected"
+let register_elements =
+  register_factors "elements_per_lane"
+    (fun r -> r.Layout.elements_per_lane)
+    (fun r -> r.Layout.elements_per_lane)
 
-let register_subgroups = function
-  | Layout.Register r -> r.Layout.subgroups_per_cta
-  | Layout.Mapped_register r -> r.Layout.subgroups_per_cta
-  | _ -> invalid_arg "register layout expected"
+let register_lanes =
+  register_factors "lanes_per_subgroup"
+    (fun r -> r.Layout.lanes_per_subgroup)
+    (fun r -> r.Layout.lanes_per_subgroup)
+
+let register_subgroups =
+  register_factors "subgroups_per_cta"
+    (fun r -> r.Layout.subgroups_per_cta)
+    (fun r -> r.Layout.subgroups_per_cta)
 
 let tensor_register_count value = match value.Ir.ty, value.Ir.layout with
   | Gpu_type.Tensor (shape, _), Some layout ->

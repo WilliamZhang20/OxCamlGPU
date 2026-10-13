@@ -653,4 +653,44 @@ let () =
     (wgmma_of ~tile_dtype:Bfloat16 ~instruction_dtype:Bfloat16));
   expect_error "E_WGMMA_TYPE" (Verifier.verify_kernel
     (wgmma_of ~tile_dtype:Float32 ~instruction_dtype:Bfloat16));
+  (* A register layout describes one CTA's tile: its extent check bounds the
+     subgroup split, so the cta coordinate is zero everywhere by construction.
+     Pinned because the arithmetic that used to compute it could only ever
+     return zero, and a reader could not tell whether that was intended. *)
+  let one_cta =
+    { Layout.elements_per_lane = [2]; lanes_per_subgroup = [8];
+      subgroups_per_cta = [4]; order = [0] }
+  in
+  let extent = 2 * 8 * 4 in
+  List.iter
+    (fun i ->
+      let h = Layout.logical_to_hardware one_cta [i] in
+      if h.Layout.cta <> [0] then
+        failwith "register layouts describe one CTA; cta must be zero";
+      if Layout.hardware_to_logical one_cta h <> [i] then
+        failwith "logical_to_hardware and hardware_to_logical must round-trip")
+    (List.init extent Fun.id);
+  (* Both directions must reject a malformed distribution by name. The reverse
+     direction used to skip the check and surface Failure "nth" instead. *)
+  let short_factors =
+    { Layout.elements_per_lane = [2]; lanes_per_subgroup = [];
+      subgroups_per_cta = [4]; order = [0] }
+  in
+  let origin =
+    { Layout.cta = [0]; subgroup = [0]; lane = [0]; register = [0];
+      lane_id = 0; register_id = 0; subgroup_id = 0 }
+  in
+  List.iter
+    (fun (what, run) ->
+      match run () with
+      | () -> failwith (what ^ " accepted a malformed register distribution")
+      | exception Invalid_argument _ -> ()
+      | exception e ->
+          failwith
+            (Printf.sprintf "%s raised %s instead of Invalid_argument" what
+               (Printexc.to_string e)))
+    [ "logical_to_hardware",
+      (fun () -> ignore (Layout.logical_to_hardware short_factors [0]));
+      "hardware_to_logical",
+      (fun () -> ignore (Layout.hardware_to_logical short_factors origin)) ];
   print_endline "verifier semantic tests passed"

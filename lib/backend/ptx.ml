@@ -475,7 +475,12 @@ let emit_target (kernel : Ptx_ir.kernel) =
     | Ptx_ir.Store_grid_leader_f32 (ptr, value) ->
         emit_grid_leader ptr value
     | Ptx_ir.Barrier_cta -> line "  bar.sync 0;"
-    | Ptx_ir.Tensor_lane_f32 _ | Ptx_ir.Warp_butterfly_sum_f32 _ -> assert false
+    | Ptx_ir.Tensor_lane_f32 _ | Ptx_ir.Warp_butterfly_sum_f32 _ ->
+        (* Physicalization expands these into per-lane slots, and the warp
+           reduction below emits them from the expanded form. Reaching here
+           means emission ran on an unphysicalized kernel. *)
+        invalid_arg
+          "PTX emission requires warp reductions to pass through physicalization"
     | Ptx_ir.Return -> line "  ret;" in
   let emit_warp_sum dst src =
     let peer_bits = b32_scratch reduction_bits_scratch_id in

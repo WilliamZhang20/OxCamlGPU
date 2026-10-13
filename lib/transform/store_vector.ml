@@ -282,14 +282,14 @@ let fuse_straight_line a body =
   let edits = Hashtbl.create 16 in
   let rec chunk = function
     | [] -> ()
-    | start :: _ as run ->
+    | start :: tail as run ->
         let length = List.length run in
         let width =
           if length >= 4 && divides 4 (congruence a start.index) then 4
           else if length >= 2 && divides 2 (congruence a start.index) then 2
           else 1
         in
-        if width = 1 then chunk (List.tl run)
+        if width = 1 then chunk tail
         else begin
           let taken = List.filteri (fun i _ -> i < width) run in
           let rest = List.filteri (fun i _ -> i >= width) run in

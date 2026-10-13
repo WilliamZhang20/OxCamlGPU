@@ -41,9 +41,16 @@ let () =
       Printf.printf "%d %d %d\n" threads
         compiled.Compiler.dynamic_shared_bytes compiled.Compiler.shared_bytes
   | ["--print-choose"; m; n; k] ->
+      let dimension name text =
+        match int_of_string_opt text with
+        | Some n when n > 0 -> n
+        | Some _ | None ->
+            Printf.eprintf "%s must be a positive integer, got: %s\n" name text;
+            exit 2
+      in
       let config =
-        Gemm_catalog.choose_config
-          ~m:(int_of_string m) ~n:(int_of_string n) ~k:(int_of_string k) ()
+        Gemm_catalog.choose_config ~m:(dimension "M" m) ~n:(dimension "N" n)
+          ~k:(dimension "K" k) ()
       in
       Printf.printf "%s %d %d %d %d\n"
         (Gemm_catalog.kernel_binding config)

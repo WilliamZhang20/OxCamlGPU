@@ -60,14 +60,24 @@ let linearize order extents coordinates =
     stride * List.nth extents dimension,
     value + stride * List.nth coordinates dimension) (1, 0) order |> snd
 
-let validate_mapping_distribution (distribution : register) =
-  let rank = List.length distribution.elements_per_lane in
-  if List.length distribution.lanes_per_subgroup <> rank ||
-     List.length distribution.subgroups_per_cta <> rank ||
-     not (List.for_all (fun n -> n > 0)
-       (distribution.elements_per_lane @ distribution.lanes_per_subgroup @
-        distribution.subgroups_per_cta)) then
-    invalid_arg "register mapping factors must be positive and have matching ranks"
+(* The three factor lists must have one entry per tensor dimension and be
+   positive, and every coordinate conversion needs the rank afterwards, so
+   this validates and returns it. [register] and [mapped_register] are
+   separate types with these same three fields, which is why it takes them
+   one by one rather than a record.
+
+   It was written out three times and simply absent from
+   [hardware_to_logical], where a short [lanes_per_subgroup] reached
+   [List.nth] and surfaced as [Failure "nth"] instead of a named error. *)
+let distribution_rank ~elements_per_lane ~lanes_per_subgroup ~subgroups_per_cta =
+  let rank = List.length elements_per_lane in
+  if List.length lanes_per_subgroup <> rank
+     || List.length subgroups_per_cta <> rank
+     || not (List.for_all (fun n -> n > 0)
+               (elements_per_lane @ lanes_per_subgroup @ subgroups_per_cta))
+  then
+    invalid_arg "register layout factors must be positive and have matching ranks";
+  rank
 
 let validate_components extents coordinates what =
   if List.length extents <> List.length coordinates ||
@@ -75,12 +85,11 @@ let validate_components extents coordinates what =
     invalid_arg (what ^ " coordinate is outside its layout extent")
 
 let mapped_to_hardware mapping logical =
-  let rank = List.length mapping.elements_per_lane in
-  if List.length mapping.lanes_per_subgroup <> rank ||
-     List.length mapping.subgroups_per_cta <> rank ||
-     not (List.for_all (fun n -> n > 0)
-       (mapping.elements_per_lane @ mapping.lanes_per_subgroup @ mapping.subgroups_per_cta)) then
-    invalid_arg "mapped register factors must be positive and have matching ranks";
+  let rank =
+    distribution_rank ~elements_per_lane:mapping.elements_per_lane
+      ~lanes_per_subgroup:mapping.lanes_per_subgroup
+      ~subgroups_per_cta:mapping.subgroups_per_cta
+  in
   if not (valid_order rank mapping.lane_order && valid_order rank mapping.register_order &&
           valid_order rank mapping.subgroup_order) then
     invalid_arg "mapped register axis orders must be permutations of tensor dimensions";
@@ -113,33 +122,49 @@ let mapped_to_hardware mapping logical =
     subgroup_id = linearize mapping.subgroup_order mapping.subgroups_per_cta subgroup }
 
 let logical_to_hardware (register : register) logical =
-  validate_mapping_distribution register;
-  let rank = List.length register.elements_per_lane in
+  let rank =
+    distribution_rank ~elements_per_lane:register.elements_per_lane
+      ~lanes_per_subgroup:register.lanes_per_subgroup
+      ~subgroups_per_cta:register.subgroups_per_cta
+  in
   if not (valid_order rank register.order) then
     invalid_arg "register order must be a permutation of tensor dimensions";
+  (* [distribution_rank] already proved the three lists have length [rank], so
+     neither [combine] nor [map2] below can raise on a length mismatch; the
+     explicit test is here only so a caller's wrong-rank coordinate gets a
+     readable message instead of "List.map2". *)
+  if List.length logical <> rank then
+    invalid_arg "logical coordinate rank does not match register layout";
   let factors = List.combine register.elements_per_lane
       (List.combine register.lanes_per_subgroup register.subgroups_per_cta) in
-  if List.length logical <> List.length factors then
-    invalid_arg "logical coordinate rank does not match register layout";
   let parts = List.map2 (fun coordinate (elements, (lanes, subgroups)) ->
     if coordinate < 0 || coordinate >= elements * lanes * subgroups then
       invalid_arg "logical coordinate is outside register layout extent";
     let per_lane, distributed =
       coordinate mod elements, coordinate / elements in
-    let lane = distributed mod lanes and cta = distributed / lanes in
-    let subgroup = cta mod subgroups and cta = cta / subgroups in
-    per_lane, lane, subgroup, cta) logical factors in
-  let register_values = List.map (fun (x,_,_,_) -> x) parts
-  and lane=List.map (fun (_,x,_,_) -> x) parts
-  and subgroup=List.map (fun (_,_,x,_) -> x) parts
-  and cta=List.map (fun (_,_,_,x) -> x) parts in
-  { register=register_values; lane; subgroup; cta;
+    (* The extent check bounds [distributed] by lanes * subgroups, so the
+       subgroup split cannot carry into a CTA index. That is by design: a
+       [register] layout describes one CTA's tile and has no factor list for
+       a grid, which is why [cta] below is zeros and why
+       [mapped_to_hardware] writes zeros outright. Adding a grid level means
+       another factor list and a wider extent check, not reviving a division
+       whose only possible result is zero. *)
+    per_lane, distributed mod lanes, distributed / lanes) logical factors in
+  let register_values = List.map (fun (x,_,_) -> x) parts
+  and lane=List.map (fun (_,x,_) -> x) parts
+  and subgroup=List.map (fun (_,_,x) -> x) parts in
+  { register=register_values; lane; subgroup;
+    cta = List.init rank (fun _ -> 0);
     lane_id = linearize register.order register.lanes_per_subgroup lane;
     register_id = linearize register.order register.elements_per_lane register_values;
     subgroup_id = linearize register.order register.subgroups_per_cta subgroup }
 
 let hardware_to_logical (layout : register) hardware =
-  let rank = List.length layout.elements_per_lane in
+  let rank =
+    distribution_rank ~elements_per_lane:layout.elements_per_lane
+      ~lanes_per_subgroup:layout.lanes_per_subgroup
+      ~subgroups_per_cta:layout.subgroups_per_cta
+  in
   if List.exists (fun xs -> List.length xs <> rank)
       [hardware.cta;hardware.subgroup;hardware.lane;hardware.register] then
     invalid_arg "hardware coordinate rank does not match register layout";
@@ -164,12 +189,11 @@ let hardware_to_logical (layout : register) hardware =
   logical
 
 let mapped_hardware_to_logical mapping hardware =
-  let rank = List.length mapping.elements_per_lane in
-  if List.length mapping.lanes_per_subgroup <> rank ||
-     List.length mapping.subgroups_per_cta <> rank ||
-     not (List.for_all (fun n -> n > 0)
-       (mapping.elements_per_lane @ mapping.lanes_per_subgroup @ mapping.subgroups_per_cta)) then
-    invalid_arg "mapped register factors must be positive and have matching ranks";
+  let rank =
+    distribution_rank ~elements_per_lane:mapping.elements_per_lane
+      ~lanes_per_subgroup:mapping.lanes_per_subgroup
+      ~subgroups_per_cta:mapping.subgroups_per_cta
+  in
   if not (valid_order rank mapping.lane_order && valid_order rank mapping.register_order &&
           valid_order rank mapping.subgroup_order) then
     invalid_arg "mapped register axis orders must be permutations of tensor dimensions";

@@ -46,14 +46,21 @@ let parse_config s =
       match String.split_on_char '=' part with
       | [k; v] -> Hashtbl.replace tbl (String.trim k) (String.trim v)
       | _ -> invalid_arg ("bad config fragment: " ^ part));
+  (* Every other failure in this parser names itself; [int_of_string] raised a
+     bare Failure, which is what a caller saw for [bm=oops]. *)
+  let integer k v =
+    match int_of_string_opt v with
+    | Some n -> n
+    | None -> invalid_arg (Printf.sprintf "config key %s is not an integer: %s" k v)
+  in
   let get k =
     match Hashtbl.find_opt tbl k with
-    | Some v -> int_of_string v
+    | Some v -> integer k v
     | None -> invalid_arg ("missing config key: " ^ k)
   in
   let stages =
     match Hashtbl.find_opt tbl "stages" with
-    | Some v -> int_of_string v
+    | Some v -> integer "stages" v
     | None -> 3
   in
   (* Unknown keys such as legacy tm/tn are ignored. WGMMA owns the mapping. *)
@@ -81,7 +88,11 @@ let tile_catalog =
     ; { bm = 256; bn = 128; bk = 32; stages = 3; producers = 32 }
     ]
 
-let hopper_f32 = List.hd tile_catalog
+(* The catalog is required to be non-empty: it is the fallback tile. *)
+let hopper_f32 =
+  match tile_catalog with
+  | config :: _ -> config
+  | [] -> invalid_arg "the tile catalog must not be empty"
 
 (* Names of the OxCaml specializations in examples/kernels/gemm.ml.
    [gemm_fast] stays the default 128×256 stages=3 entry (H100 harness).
