@@ -17,9 +17,12 @@ type tile_slot_address =
       row_stride : int;
     }
 
-let mapping_for_layout = function
-  | Some (Layout.Mapped_register mapping) -> Some mapping
-  | Some (Layout.Register distribution) -> Some {
+(* A plain register distribution is the Blocked mapping of the same three
+   factor lists, so normalizing here lets everything downstream read mapping
+   fields directly instead of a per-field accessor per layout constructor. *)
+let mapping_of_register_layout = function
+  | Layout.Mapped_register mapping -> Some mapping
+  | Layout.Register distribution -> Some {
       Layout.elements_per_lane=distribution.elements_per_lane;
       lanes_per_subgroup=distribution.lanes_per_subgroup;
       subgroups_per_cta=distribution.subgroups_per_cta;
@@ -27,44 +30,34 @@ let mapping_for_layout = function
       lane_order=distribution.order;
       register_order=distribution.order;
       subgroup_order=distribution.order }
-  | _ -> None
+  | Layout.Shared _ | Layout.Padded_shared _ | Layout.Global _ -> None
+
+let mapping_for_layout layout = Option.bind layout mapping_of_register_layout
 
 let max_value_id target =
   List.fold_left (fun n v -> max n v.Ir.id) (-1) (Ptx_ir.all_values target)
 
-(* The three factor lists of whichever register layout a tile carries. The
-   message names the field, because all three used to report the same string
-   and a failure could not say which lookup went wrong. *)
-let register_factors what select_register select_mapped = function
-  | Layout.Register r -> select_register r
-  | Layout.Mapped_register r -> select_mapped r
-  | layout ->
+let register_mapping what layout =
+  match mapping_of_register_layout layout with
+  | Some mapping -> mapping
+  | None ->
       invalid_arg
         (Printf.sprintf "%s requires a register layout, got %s" what
            (Layout.string_of_t layout))
 
-let register_elements =
-  register_factors "elements_per_lane"
-    (fun r -> r.Layout.elements_per_lane)
-    (fun r -> r.Layout.elements_per_lane)
-
-let register_lanes =
-  register_factors "lanes_per_subgroup"
-    (fun r -> r.Layout.lanes_per_subgroup)
-    (fun r -> r.Layout.lanes_per_subgroup)
-
-let register_subgroups =
-  register_factors "subgroups_per_cta"
-    (fun r -> r.Layout.subgroups_per_cta)
-    (fun r -> r.Layout.subgroups_per_cta)
+(* Registers per lane of a mapping. Physicalization models exactly one
+   32-lane subgroup per CTA, so anything else is refused here. *)
+let one_warp_register_count mapping =
+  let product = List.fold_left ( * ) 1 in
+  if product mapping.Layout.lanes_per_subgroup <> 32
+     || product mapping.Layout.subgroups_per_cta <> 1 then
+    invalid_arg "physicalization currently requires one 32-lane subgroup per CTA";
+  product mapping.Layout.elements_per_lane
 
 let tensor_register_count value = match value.Ir.ty, value.Ir.layout with
   | Gpu_type.Tensor (shape, _), Some layout ->
-      let elements=List.fold_left ( * ) 1 (register_elements layout)
-      and lanes=List.fold_left ( * ) 1 (register_lanes layout)
-      and subgroups=List.fold_left ( * ) 1 (register_subgroups layout) in
-      if lanes <> 32 || subgroups <> 1 then
-        invalid_arg "physicalization currently requires one 32-lane subgroup per CTA";
+      let elements =
+        one_warp_register_count (register_mapping "physicalization" layout) in
       ignore (Layout.static_extents shape);
       elements
   | Gpu_type.Tensor _, _ -> invalid_arg "physicalization requires a tensor with a register layout"
@@ -80,69 +73,76 @@ let iter_coordinates extents f =
   in
   loop [] 0
 
+(* Per-(lane, register) logical offsets of a mapped tile: slot
+   [lane * elements + register] holds the memory offset of the element that
+   lane keeps in that register. Every slot must be claimed at most once, and
+   only by a lane of the one warp (CTA coordinates all zero). *)
+let lane_register_offsets mapping ~elements extents strides =
+  let offsets = Array.make (32 * elements) (-1) in
+  iter_coordinates extents (fun logical ->
+    let hardware = Layout.mapped_to_hardware mapping logical in
+    if List.exists (fun c -> c <> 0) hardware.cta || hardware.subgroup_id <> 0 ||
+       hardware.lane_id < 0 || hardware.lane_id >= 32 ||
+       hardware.register_id < 0 || hardware.register_id >= elements then
+      invalid_arg "physicalization received an unsupported tile mapping";
+    let slot = hardware.lane_id * elements + hardware.register_id in
+    if offsets.(slot) <> -1 then
+      invalid_arg "physicalization layout maps multiple elements to one lane register";
+    offsets.(slot) <- Layout.linear_offset strides logical);
+  offsets
+
+(* One [Linear] address per register when the offsets are affine in the lane,
+   or [None] when some register's lanes do not sit on a line. *)
+let affine_addresses offsets ~elements =
+  let affine index =
+    let base = offsets.(index) and next = offsets.(elements + index) in
+    let lane_stride = next - base in
+    let on_line lane = offsets.(lane * elements + index) = base + lane * lane_stride in
+    if List.for_all on_line (List.init 32 Fun.id) then
+      Some (Linear { base; lane_stride })
+    else None
+  in
+  let addresses = List.init elements affine in
+  if List.for_all Option.is_some addresses then
+    Some (List.filter_map Fun.id addresses)
+  else None
+
+(* A tile whose lane [r * cols + c] owns element (r, c) is read with plain
+   row-major addressing, no per-register table needed. *)
+let row_major_address mapping ~elements extents ~cols ~row_stride =
+  let lane_matches logical =
+    match logical with
+    | [r; c] -> (Layout.mapped_to_hardware mapping logical).lane_id = r * cols + c
+    | _ -> false
+  in
+  let all_match = ref true in
+  iter_coordinates extents (fun logical ->
+    if not (lane_matches logical) then all_match := false);
+  if elements = 1 && !all_match then
+    Some (Rank2 { tile_cols = cols; row_offset = 0; col_offset = 0; row_stride })
+  else None
+
 let tile_slot_addresses mapping extents strides =
-  let elements=List.fold_left ( * ) 1 mapping.Layout.elements_per_lane in
-  let lanes=List.fold_left ( * ) 1 mapping.Layout.lanes_per_subgroup in
-  let subgroups=List.fold_left ( * ) 1 mapping.Layout.subgroups_per_cta in
-  if lanes <> 32 || subgroups <> 1 then
-    invalid_arg "physicalization currently requires one 32-lane subgroup per CTA";
+  let elements = one_warp_register_count mapping in
+  let offsets () = lane_register_offsets mapping ~elements extents strides in
   match extents, strides with
-  | [extent], [stride] ->
-      let offsets=Array.make (32 * elements) (-1) in
-      for logical=0 to extent-1 do
-        let hardware = Layout.mapped_to_hardware mapping [logical] in
-        if hardware.cta <> [0] || hardware.subgroup_id <> 0 ||
-           hardware.lane_id < 0 || hardware.lane_id >= 32 ||
-           hardware.register_id < 0 || hardware.register_id >= elements then
-          invalid_arg "physicalization received an unsupported tile mapping";
-        let slot=hardware.lane_id * elements + hardware.register_id in
-        if offsets.(slot) <> -1 then
-          invalid_arg "physicalization layout maps multiple elements to one lane register";
-        offsets.(slot) <- logical * stride
-      done;
-      List.init elements (fun index ->
-        let base=offsets.(index) and next=offsets.(elements + index) in
-        let lane_stride=next-base in
-        for lane=0 to 31 do
-          if offsets.(lane * elements + index) <> base + lane * lane_stride then
-            invalid_arg "physicalization: layout is not affine in lane and register coordinates"
-        done;
-        Linear { base; lane_stride })
+  | [_], [_] ->
+      (match affine_addresses (offsets ()) ~elements with
+       | Some addresses -> addresses
+       | None ->
+           invalid_arg
+             "physicalization: layout is not affine in lane and register coordinates")
   | [_; cols], [row_stride; col_stride] ->
       if col_stride <> 1 then
         invalid_arg "physicalization currently requires unit stride on the fastest MemRef dimension";
-      let elements=List.fold_left ( * ) 1 mapping.Layout.elements_per_lane in
-      let offsets=Array.make (32 * elements) (-1) in
-      iter_coordinates extents (fun logical ->
-        let hardware = Layout.mapped_to_hardware mapping logical in
-        if hardware.subgroup_id <> 0 ||
-           hardware.lane_id < 0 || hardware.lane_id >= 32 ||
-           hardware.register_id < 0 || hardware.register_id >= elements then
-          invalid_arg "physicalization received an unsupported tile mapping";
-        let slot=hardware.lane_id * elements + hardware.register_id in
-        if offsets.(slot) <> -1 then
-          invalid_arg "physicalization layout maps multiple elements to one lane register";
-        offsets.(slot) <- Layout.linear_offset strides logical);
-      let row_major_rank2 () =
-        if elements <> 1 then raise Exit;
-        let expected_lane logical =
-          match logical with [r; c] -> r * cols + c | _ -> assert false in
-        iter_coordinates extents (fun logical ->
-          let hardware = Layout.mapped_to_hardware mapping logical in
-          if hardware.lane_id <> expected_lane logical then raise Exit);
-        [Rank2 { tile_cols=cols; row_offset=0; col_offset=0; row_stride }] in
-      let linear_affine () =
-        List.init elements (fun index ->
-          let base=offsets.(index) and next=offsets.(elements + index) in
-          let lane_stride=next-base in
-          for lane=0 to 31 do
-            if offsets.(lane * elements + index) <> base + lane * lane_stride then
-              raise Exit
-          done;
-          Linear { base; lane_stride }) in
-      (try row_major_rank2 () with Exit ->
-         try linear_affine () with Exit ->
-           invalid_arg "rank-2 physicalization requires row-major lane ownership or affine linear addressing")
+      let offsets = offsets () in
+      (match row_major_address mapping ~elements extents ~cols ~row_stride with
+       | Some address -> [address]
+       | None ->
+           match affine_addresses offsets ~elements with
+           | Some addresses -> addresses
+           | None ->
+               invalid_arg "rank-2 physicalization requires row-major lane ownership or affine linear addressing")
   | _ -> invalid_arg "physicalization currently supports rank-1 or rank-2 tiles only"
 
 let scalar_dtype value = match value.Ir.ty with
@@ -150,32 +150,44 @@ let scalar_dtype value = match value.Ir.ty with
   | Gpu_type.I32 | Gpu_type.Bool -> Some Gpu_type.Int32
   | _ -> None
 
+(* The scalar register that stands for a tensor's [index]th per-lane element,
+   or for the tensor itself when it is already a scalar. Slot 0 reuses the
+   semantic value's id, so scalar code keeps its names. *)
+let register_type = function
+  | Gpu_type.Float32 -> Gpu_type.F32
+  | Gpu_type.Int32 -> Gpu_type.I32
+  (* Narrow floats have no register form: they are a storage format that TMA
+     moves and WGMMA reads from shared memory. *)
+  | Gpu_type.Bfloat16 | Gpu_type.Float16 ->
+      invalid_arg "narrow float tiles have no register representation"
+
+let value_registers ~next_id semantic =
+  match semantic.Ir.ty with
+  | Gpu_type.Tensor (_, dtype) ->
+      List.init (tensor_register_count semantic) (fun index ->
+        let ty = register_type dtype in
+        let value =
+          if index = 0 then { semantic with Ir.ty; layout = None }
+          else begin
+            let id = !next_id in
+            incr next_id;
+            Ir.make_value id ty
+          end
+        in
+        { index; dtype = Some dtype; value })
+  | _ -> [{ index = 0; dtype = scalar_dtype semantic; value = semantic }]
+
 let physicalize target =
   let next_id = ref (max_value_id target + 1) in
   let table = Hashtbl.create 32 in
-  let values=Ptx_ir.all_values target in
-  List.iter (fun semantic -> if not (Hashtbl.mem table semantic.Ir.id) then begin
-    let registers=match semantic.Ir.ty with
-      | Gpu_type.Tensor (_, dtype) ->
-          let count=tensor_register_count semantic in
-          List.init count (fun index ->
-            let scalar_ty=match dtype with
-              (* Narrow floats have no register form: they are a storage
-                 format that TMA moves and WGMMA reads from shared memory. *)
-              | Gpu_type.Float32 -> Gpu_type.F32
-              | Gpu_type.Int32 -> Gpu_type.I32
-              | Gpu_type.Bfloat16 | Gpu_type.Float16 ->
-                  invalid_arg "narrow float tiles have no register representation" in
-            let scalar=if index=0 then { semantic with Ir.ty=scalar_ty; layout=None }
-              else begin
-                let id= !next_id in incr next_id;
-                Ir.make_value id scalar_ty
-              end in
-            { index; dtype=Some dtype; value=scalar })
-      | _ -> [{ index=0; dtype=scalar_dtype semantic; value=semantic }] in
-    Hashtbl.add table semantic.Ir.id { semantic; registers;
-      layout_mapping=mapping_for_layout semantic.Ir.layout }
-  end) values;
+  List.iter
+    (fun semantic ->
+      if not (Hashtbl.mem table semantic.Ir.id) then
+        Hashtbl.add table semantic.Ir.id
+          { semantic;
+            registers = value_registers ~next_id semantic;
+            layout_mapping = mapping_for_layout semantic.Ir.layout })
+    (Ptx_ir.all_values target);
   (* Every value reachable from the target was registered above, so a miss is
      a bug in this pass. Say which value, the way the slot lookup below does,
      rather than letting Not_found escape the compiler. *)
@@ -185,164 +197,92 @@ let physicalize target =
     | None ->
         invalid_arg
           (Printf.sprintf "physicalization: value %d was never registered" id) in
+  let register_count tensor = List.length (physical tensor.Ir.id).registers in
   let slot value index =
     match List.find_opt (fun register -> register.index=index) (physical value.Ir.id).registers with
     | Some register -> register.value
     | None -> invalid_arg (Printf.sprintf "physicalization: tensor %d has no register slot %d" value.Ir.id index) in
   let scalar value =
-    let p=physical value.Ir.id in
-    match p.registers with
+    match (physical value.Ir.id).registers with
     | [register] -> register.value
     | _ -> invalid_arg (Printf.sprintf "physicalization: tensor %d used as a scalar" value.Ir.id) in
   let addresses tensor memref =
-    let p=physical tensor.Ir.id in
-    let mapping=match p.layout_mapping with
+    let mapping=match (physical tensor.Ir.id).layout_mapping with
       | Some mapping -> mapping
       | None -> invalid_arg "physicalization: tensor has no layout mapping" in
     let shape=match tensor.Ir.ty with
       | Gpu_type.Tensor (shape, _) -> shape
       | _ -> invalid_arg "tile addressing requires a tensor" in
-    let extents = Layout.static_extents shape in
     let strides=match memref.Ir.ty with
       | Gpu_type.MemRef (mem_shape, _, _) ->
           if mem_shape <> shape then
             invalid_arg "tile MemRef shape must match the tensor shape";
           Layout.memref_strides mem_shape memref.Ir.layout
       | _ -> invalid_arg "tile addressing requires a MemRef" in
-    tile_slot_addresses mapping extents strides in
-  let lower_operation operation = match operation with
+    tile_slot_addresses mapping (Layout.static_extents shape) strides in
+  (* One operation per register of [tensor], addressed by [memref]. *)
+  let per_tile_slot tensor memref ~linear ~rank2 =
+    List.mapi
+      (fun index -> function
+        | Linear { base; lane_stride } -> linear index base lane_stride
+        | Rank2 { tile_cols; row_offset; col_offset; row_stride } ->
+            rank2 index tile_cols row_offset col_offset row_stride)
+      (addresses tensor memref)
+  in
+  let masked_needs_rank2 what _ _ _ =
+    invalid_arg ("masked tile " ^ what ^ " currently require rank-2 tiles") in
+  let lower_operation = function
     | Ptx_ir.Tile_load_f32 (tensor, memref) ->
-        List.mapi (fun index addr -> match addr with
-          | Linear { base; lane_stride } ->
-              Ptx_ir.Tile_load_f32_indexed (slot tensor index, scalar memref, base, lane_stride)
-          | Rank2 { tile_cols; row_offset; col_offset; row_stride } ->
-              Ptx_ir.Tile_load_f32_2d (slot tensor index, scalar memref,
-                tile_cols, row_offset, col_offset, row_stride, None))
-          (addresses tensor memref)
+        per_tile_slot tensor memref
+          ~linear:(fun i base lane_stride ->
+            Ptx_ir.Tile_load_f32_indexed
+              (slot tensor i, scalar memref, base, lane_stride))
+          ~rank2:(fun i cols ro co rs ->
+            Ptx_ir.Tile_load_f32_2d
+              (slot tensor i, scalar memref, cols, ro, co, rs, None))
     | Ptx_ir.Tile_store_f32 (memref, tensor) ->
-        List.mapi (fun index addr -> match addr with
-          | Linear { base; lane_stride } ->
-              Ptx_ir.Tile_store_f32_indexed (scalar memref, slot tensor index, base, lane_stride)
-          | Rank2 { tile_cols; row_offset; col_offset; row_stride } ->
-              Ptx_ir.Tile_store_f32_2d (scalar memref, slot tensor index,
-                tile_cols, row_offset, col_offset, row_stride, None))
-          (addresses tensor memref)
-    | Ptx_ir.Tile_load_f32_masked (tensor, memref, rows, cols) ->
-        List.mapi (fun index addr -> match addr with
-          | Rank2 { tile_cols; row_offset; col_offset; row_stride } ->
-              Ptx_ir.Tile_load_f32_2d (slot tensor index, scalar memref,
-                tile_cols, row_offset, col_offset, row_stride, Some (scalar rows, scalar cols))
-          | Linear _ -> invalid_arg "masked tile loads currently require rank-2 tiles")
-          (addresses tensor memref)
-    | Ptx_ir.Tile_store_f32_masked (memref, tensor, rows, cols) ->
-        List.mapi (fun index addr -> match addr with
-          | Rank2 { tile_cols; row_offset; col_offset; row_stride } ->
-              Ptx_ir.Tile_store_f32_2d (scalar memref, slot tensor index,
-                tile_cols, row_offset, col_offset, row_stride, Some (scalar rows, scalar cols))
-          | Linear _ -> invalid_arg "masked tile stores currently require rank-2 tiles")
-          (addresses tensor memref)
+        per_tile_slot tensor memref
+          ~linear:(fun i base lane_stride ->
+            Ptx_ir.Tile_store_f32_indexed
+              (scalar memref, slot tensor i, base, lane_stride))
+          ~rank2:(fun i cols ro co rs ->
+            Ptx_ir.Tile_store_f32_2d
+              (scalar memref, slot tensor i, cols, ro, co, rs, None))
+    | Ptx_ir.Tile_load_f32_masked (tensor, memref, rows, cols_bound) ->
+        per_tile_slot tensor memref
+          ~linear:(masked_needs_rank2 "loads")
+          ~rank2:(fun i cols ro co rs ->
+            Ptx_ir.Tile_load_f32_2d
+              ( slot tensor i, scalar memref, cols, ro, co, rs
+              , Some (scalar rows, scalar cols_bound) ))
+    | Ptx_ir.Tile_store_f32_masked (memref, tensor, rows, cols_bound) ->
+        per_tile_slot tensor memref
+          ~linear:(masked_needs_rank2 "stores")
+          ~rank2:(fun i cols ro co rs ->
+            Ptx_ir.Tile_store_f32_2d
+              ( scalar memref, slot tensor i, cols, ro, co, rs
+              , Some (scalar rows, scalar cols_bound) ))
     | Ptx_ir.Tensor_scale_f32 (dst, src, factor) ->
-        List.init (List.length (physical dst.Ir.id).registers) (fun index ->
-          Ptx_ir.Mul_f32 (slot dst index, slot src index, scalar factor))
+        List.init (register_count dst) (fun i ->
+          Ptx_ir.Mul_f32 (slot dst i, slot src i, scalar factor))
     | Ptx_ir.Tensor_mul_f32 (dst, left, right) ->
-        List.init (List.length (physical dst.Ir.id).registers) (fun index ->
-          Ptx_ir.Mul_f32 (slot dst index, slot left index, slot right index))
+        List.init (register_count dst) (fun i ->
+          Ptx_ir.Mul_f32 (slot dst i, slot left i, slot right i))
     | Ptx_ir.Tensor_lane_f32 (dst, tensor) ->
-        (match List.init (List.length (physical tensor.Ir.id).registers) (slot tensor) with
+        (match List.init (register_count tensor) (slot tensor) with
          | [] -> invalid_arg "physicalization: tensor has no registers"
          | first :: rest ->
-             [Ptx_ir.Move (scalar dst, first)] @
-             List.map (fun register -> Ptx_ir.Add_f32 (scalar dst, scalar dst, register)) rest)
-    | Ptx_ir.Const_bool (dst, b) -> [Ptx_ir.Const_bool (scalar dst, b)]
-    | Ptx_ir.Sub_i32 (dst,a,b) -> [Ptx_ir.Sub_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Mul_i32 (dst,a,b) -> [Ptx_ir.Mul_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Div_i32 (dst,a,b) -> [Ptx_ir.Div_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Min_i32 (dst,a,b) -> [Ptx_ir.Min_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Rem_i32 (dst,a,b) -> [Ptx_ir.Rem_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Compare (dst,c,a,b) -> [Ptx_ir.Compare (scalar dst,c,scalar a,scalar b)]
-    | Ptx_ir.Move (dst,src) -> [Ptx_ir.Move (scalar dst,scalar src)]
-    | Ptx_ir.Const_i32 (dst,n) -> [Ptx_ir.Const_i32 (scalar dst,n)]
-    | Ptx_ir.Const_f32 (dst,n) -> [Ptx_ir.Const_f32 (scalar dst,n)]
-    | Ptx_ir.Add_i32 (dst,a,b) -> [Ptx_ir.Add_i32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Add_f32 (dst,a,b) -> [Ptx_ir.Add_f32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Mul_f32 (dst,a,b) -> [Ptx_ir.Mul_f32 (scalar dst,scalar a,scalar b)]
-    | Ptx_ir.Mad_f32 (dst,a,b,c) -> [Ptx_ir.Mad_f32 (scalar dst,scalar a,scalar b,scalar c)]
-    | Ptx_ir.Unary_f32 (dst,op,a) -> [Ptx_ir.Unary_f32 (scalar dst,op,scalar a)]
-    | Ptx_ir.F32_of_i32 (dst,a) -> [Ptx_ir.F32_of_i32 (scalar dst,scalar a)]
-    | Ptx_ir.Binary_f32 (dst,op,a,b) ->
-        [Ptx_ir.Binary_f32 (scalar dst,op,scalar a,scalar b)]
-    | Ptx_ir.Thread_idx_x dst -> [Ptx_ir.Thread_idx_x (scalar dst)]
-    | Ptx_ir.Global_idx_x dst -> [Ptx_ir.Global_idx_x (scalar dst)]
-    | Ptx_ir.Block_idx_x dst -> [Ptx_ir.Block_idx_x (scalar dst)]
-    | Ptx_ir.Block_idx_y dst -> [Ptx_ir.Block_idx_y (scalar dst)]
-    | Ptx_ir.Gep_f32 (dst,p,index) -> [Ptx_ir.Gep_f32 (scalar dst,scalar p,scalar index)]
-    | Ptx_ir.Load_f32 (dst,p) -> [Ptx_ir.Load_f32 (scalar dst,scalar p)]
-    | Ptx_ir.Load_f32_masked (dst,p,index,bound) ->
-        [Ptx_ir.Load_f32_masked (scalar dst,scalar p,scalar index,scalar bound)]
-    | Ptx_ir.Load_f32x4 (a,b,c,d,p) ->
-        [Ptx_ir.Load_f32x4 (scalar a,scalar b,scalar c,scalar d,scalar p)]
-    | Ptx_ir.Shared_load_f32 (dst,p,index) ->
-        [Ptx_ir.Shared_load_f32 (scalar dst,scalar p,scalar index)]
-    | Ptx_ir.Shared_load_f32x4 (a,b,c,d,p,index) ->
-        [Ptx_ir.Shared_load_f32x4 (scalar a,scalar b,scalar c,scalar d,scalar p,scalar index)]
-    | Ptx_ir.Shared_store_f32 (p,value,index) ->
-        [Ptx_ir.Shared_store_f32 (scalar p,scalar value,scalar index)]
-    | Ptx_ir.Shared_store_f32x4 (p,a,b,c,d,index) ->
-        [Ptx_ir.Shared_store_f32x4 (scalar p,scalar a,scalar b,scalar c,scalar d,scalar index)]
-    | Ptx_ir.Cp_async_shared_f32x4 (p,index,g) ->
-        [Ptx_ir.Cp_async_shared_f32x4 (scalar p,scalar index,scalar g)]
-    | Ptx_ir.Cp_async_commit -> [Ptx_ir.Cp_async_commit]
-    | Ptx_ir.Cp_async_wait_all -> [Ptx_ir.Cp_async_wait_all]
-    | Ptx_ir.Mbarrier_init (m,c,p) ->
-        [Ptx_ir.Mbarrier_init (scalar m, scalar c, Option.map scalar p)]
-    | Ptx_ir.Mbarrier_arrive_expect_tx (m,t,p) ->
-        [Ptx_ir.Mbarrier_arrive_expect_tx (scalar m, scalar t, Option.map scalar p)]
-    | Ptx_ir.Mbarrier_arrive (m,p) ->
-        [Ptx_ir.Mbarrier_arrive (scalar m, Option.map scalar p)]
-    | Ptx_ir.Mbarrier_try_wait_parity (m,p) ->
-        [Ptx_ir.Mbarrier_try_wait_parity (scalar m, scalar p)]
-    | Ptx_ir.Mbarrier_slot (d,set,ix) ->
-        [Ptx_ir.Mbarrier_slot (d, scalar set, scalar ix)]
-    | Ptx_ir.Tma_load_2d (s,i,t,c0,c1,m,p) ->
-        [Ptx_ir.Tma_load_2d
-           ( scalar s, scalar i, scalar t, scalar c0, scalar c1, scalar m
-           , Option.map scalar p )]
-    | Ptx_ir.Fence_proxy_async -> [Ptx_ir.Fence_proxy_async]
-    | Ptx_ir.Gmma_descriptor (d, s, i, fields) ->
-        [Ptx_ir.Gmma_descriptor (scalar d, scalar s, scalar i, fields)]
-    | Ptx_ir.Wgmma_fence -> [Ptx_ir.Wgmma_fence]
-    | Ptx_ir.Wgmma_mma (element,acc,da,db,n,scale) ->
-        [Ptx_ir.Wgmma_mma
-           (element, List.map scalar acc, scalar da, scalar db, n, scale)]
-    | Ptx_ir.Wgmma_commit_group -> [Ptx_ir.Wgmma_commit_group]
-    | Ptx_ir.Wgmma_wait_group n -> [Ptx_ir.Wgmma_wait_group n]
-    | Ptx_ir.Store_f32 (p,value) -> [Ptx_ir.Store_f32 (scalar p,scalar value)]
-    | Ptx_ir.Store_f32x2 (p,a,b) ->
-        [Ptx_ir.Store_f32x2 (scalar p,scalar a,scalar b)]
-    | Ptx_ir.Store_f32x4 (p,a,b,c,d) ->
-        [Ptx_ir.Store_f32x4 (scalar p,scalar a,scalar b,scalar c,scalar d)]
-    | Ptx_ir.Store_f32_masked (p,value,index,bound) ->
-        [Ptx_ir.Store_f32_masked (scalar p,scalar value,scalar index,scalar bound)]
-    | Ptx_ir.Tile_load_f32_indexed (dst,p,base,stride) ->
-        [Ptx_ir.Tile_load_f32_indexed (scalar dst,scalar p,base,stride)]
-    | Ptx_ir.Tile_store_f32_indexed (p,value,base,stride) ->
-        [Ptx_ir.Tile_store_f32_indexed (scalar p,scalar value,base,stride)]
-    | Ptx_ir.Tile_load_f32_2d (dst,p,cols,ro,co,rs,bounds) ->
-        [Ptx_ir.Tile_load_f32_2d (scalar dst,scalar p,cols,ro,co,rs,
-          Option.map (fun (a,b) -> scalar a, scalar b) bounds)]
-    | Ptx_ir.Tile_store_f32_2d (p,value,cols,ro,co,rs,bounds) ->
-        [Ptx_ir.Tile_store_f32_2d (scalar p,scalar value,cols,ro,co,rs,
-          Option.map (fun (a,b) -> scalar a, scalar b) bounds)]
-    | Ptx_ir.Store_grid_leader_f32 (p,value) ->
-        [Ptx_ir.Store_grid_leader_f32 (scalar p,scalar value)]
-    | Ptx_ir.Barrier_cta | Ptx_ir.Label _ | Ptx_ir.Jump _ | Ptx_ir.Jump_uni _
-    | Ptx_ir.Branch _ | Ptx_ir.Branch_uni _
-    | Ptx_ir.Shared_alloc _
-    | Ptx_ir.Warp_butterfly_sum_f32 _ | Ptx_ir.Return as op -> [op]
+             Ptx_ir.Move (scalar dst, first)
+             :: List.map
+                  (fun register ->
+                    Ptx_ir.Add_f32 (scalar dst, scalar dst, register))
+                  rest)
+    (* Everything else is scalar already: swap each value for its register. *)
+    | op -> [Ptx_ir.map_values scalar op]
   in
-  let body=List.concat_map lower_operation target.Ptx_ir.body in
-  let target={target with Ptx_ir.body=body} in
-  { target; values=Hashtbl.fold (fun id value acc -> (id,value)::acc) table [] }
+  let body = List.concat_map lower_operation target.Ptx_ir.body in
+  { target = { target with Ptx_ir.body = body };
+    values = Hashtbl.fold (fun id value acc -> (id, value) :: acc) table [] }
 
 let lookup kernel value = List.assoc_opt value.Ir.id kernel.values
 
