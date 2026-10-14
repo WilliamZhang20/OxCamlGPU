@@ -73,8 +73,15 @@ done
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-cp tools/export_typedtree_modes.ml "$tmp/export_typedtree_modes.ml"
-cp tools/typedtree_support.ml "$tmp/typedtree_support.ml"
+# The adapter's modules, in dependency order. The last one is the executable.
+adapter=(typedtree_support export_state export_arith export_prims_memory
+  export_prims_hopper export_prims_index export_prims_float export_control
+  export_prims export_expr export_dce export_kernel export_typedtree_modes)
+adapter_sources=()
+for name in "${adapter[@]}"; do
+  cp "tools/exporter/$name.ml" "$tmp/$name.ml"
+  adapter_sources+=("$tmp/$name.ml")
+done
 # Schema modules shared between the host library and this adapter. Paths are
 # stage-relative under lib/; they are flattened into $tmp, which is also how
 # the library sees them (lib/dune uses include_subdirs unqualified).
@@ -94,7 +101,7 @@ done
   -I "$main_build/.oxcaml_common.objs/byte" -I "$main_build/.oxcaml_common.objs/native" \
   "$main_build/ocamlcommon.cmxa" "$main_build/ocamlfrontend.cmxa" \
   "$main_build/oxcaml_common.cmxa" "${shared_objects[@]}" \
-  "$tmp/typedtree_support.ml" "$tmp/export_typedtree_modes.ml" \
+  "${adapter_sources[@]}" \
   -ccopt "-L$stdlib_dir" -o "$tmp/export_typedtree_modes"
 
 # The OxCaml-only DSL API lives in lib/dsl/ alongside the compiler library.

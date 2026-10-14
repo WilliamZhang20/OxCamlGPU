@@ -60,8 +60,8 @@ kernel.ml
   → PTX IR and printer
 ```
 
-- `tools/typedtree_support.ml` recognizes supported OxCaml types, modes, and primitive declarations. It depends on the matching compiler-libs.
-- `tools/export_typedtree_modes.ml` walks Typedtree expressions and builds the shared `Kernel_ast`. `Gpu_metadata` encodes the complete artifact; output is buffered so a failed import cannot leave partial metadata.
+- `tools/exporter/typedtree_support.ml` recognizes supported OxCaml types, modes, and primitive declarations. It depends on the matching compiler-libs.
+- `tools/exporter/export_typedtree_modes.ml` walks Typedtree expressions and builds the shared `Kernel_ast`. `Gpu_metadata` encodes the complete artifact; output is buffered so a failed import cannot leave partial metadata.
 - `Oxcaml_frontend.import` decodes metadata. `Kernel_frontend.lower` creates semantic IR values and calls the verifier.
 - `Verifier` checks types, SSA scope, modes, memory access, layouts, and shared-memory initialization. `Uniformity` rejects collectives reached by insufficiently uniform participation.
 - `Optimizer` reuses a prior load only when intervening writes cannot alias it, and value-numbers pure integer arithmetic so a repeated computation is emitted once. The second matters because compiler-generated expansions repeat themselves: an accumulator-position query re-derives the lane from the thread id at every call site, which without value numbering turned the GEMM epilogue into 4483 lines of PTX instead of 1219.

@@ -53,6 +53,13 @@ let is_scalar = function
 let path_uid env path =
   try Some (Env.find_type path env).type_uid with Not_found -> None
 
+(* Whether [p] names the same declaration as [target]: resolved by identity,
+   so a lookalike type with the same name does not match. *)
+let same_declaration env p target =
+  match path_uid env p, path_uid env target with
+  | Some u, Some t -> Types.Uid.equal u t
+  | _ -> false
+
 let rec kind env loc typ =
   let env = Envaux.env_of_only_summary env in
   let typ = Ctype.expand_head env typ in
@@ -65,20 +72,12 @@ let rec kind env loc typ =
   | Types.Tconstr (p, [], _) when Path.same p Predef.path_bool -> Boolean
   | Types.Tconstr (p, [], _) when Path.same p Predef.path_unit -> Unit
   | Types.Tconstr (p, [], _) ->
-      let matches target =
-        match path_uid env p, path_uid env target with
-        | Some u, Some t -> Types.Uid.equal u t
-        | _ -> false
-      in
+      let matches = same_declaration env p in
       if matches gpu_mbarrier_path then Mbarrier
       else if matches wgmma_acc_path then Wgmma_acc
       else fail loc "unsupported GPU type declaration"
   | Types.Tconstr (p, [element], _) ->
-      let matches target =
-        match path_uid env p, path_uid env target with
-        | Some u, Some t -> Types.Uid.equal u t
-        | _ -> false
-      in
+      let matches = same_declaration env p in
       if matches gpu_array_path then Buffer (element_dtype env loc element)
       else if matches gpu_shared_path then Shared (element_dtype env loc element)
       else if matches tensor_map_path then Tensor_map (element_dtype env loc element)
@@ -93,11 +92,7 @@ and element_dtype env loc typ =
   match Types.get_desc (Ctype.expand_head env typ) with
   | Types.Tconstr (p, [], _) when Path.same p Predef.path_float -> G.Float32
   | Types.Tconstr (p, [], _) ->
-      let matches target =
-        match path_uid env p, path_uid env target with
-        | Some u, Some t -> Types.Uid.equal u t
-        | _ -> false
-      in
+      let matches = same_declaration env p in
       if matches bf16_path then G.Bfloat16
       else if matches f16_path then G.Float16
       else fail loc "unsupported GPU element type (expected float, bf16 or f16)"

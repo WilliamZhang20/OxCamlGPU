@@ -6,7 +6,7 @@ cases in the test suite.
 
 ## The model the adapter already has
 
-`tools/export_typedtree_modes.ml` is a partial evaluator over the Typedtree,
+`tools/exporter/export_typedtree_modes.ml` is a partial evaluator over the Typedtree,
 not a code generator for functions. A `Texp_function` evaluates to a
 compile-time value
 
@@ -157,7 +157,7 @@ usability win here.
 
 ## Writing CPU code in a kernel
 
-The GPU surface is a whitelist, and `typedtree_support.ml` matches it by
+The GPU surface is a whitelist, and `tools/exporter/typedtree_support.ml` matches it by
 compiler identity (`Types.Uid.equal` on the value description) rather than by
 name. So an ordinary Stdlib function has no GPU meaning however well it
 typechecks, and a user function that shadows a primitive's name is a different

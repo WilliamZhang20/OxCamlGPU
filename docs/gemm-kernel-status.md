@@ -65,6 +65,6 @@ stage index is dynamic.
 | `docs/gemm-frontend.md` | Design, launch contract, scheduling idioms |
 | `lib/transform/store_vector.ml` | Why the epilogue vectorizes without being written that way |
 | `lib/backend/ptx_ir.ml` | `shared_plan`: the one shared-window layout |
-| `tools/export_typedtree_modes.ml` | for / wgmma_acc / shared_wgmma |
+| `tools/exporter/export_typedtree_modes.ml` | for / wgmma_acc / shared_wgmma |
 | `lib/dsl/gpu_dsl.mli` | Author API |
 | `test/emit_gemm_ptx.ml` | `--gpu`, `--info`, `--print-choose` |
