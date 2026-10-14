@@ -2,7 +2,6 @@
    them. *)
 open Typedtree
 module K = Kernel_ast
-open Typedtree_support
 open Export_state
 
 let coordinate : handler =

@@ -1,6 +1,5 @@
 (* Float intrinsics: conversions, unary and binary functions, fused
    multiply-add, and the warp reduction. *)
-open Typedtree
 module K = Kernel_ast
 module G = Gpu_type
 open Typedtree_support
